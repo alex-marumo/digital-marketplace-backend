@@ -1,19 +1,22 @@
 const { Sequelize } = require("sequelize");
-const config = require("../config/config")[process.env.NODE_ENV || "development"];
 
-const sequelize = config.use_env_variable
-  ? new Sequelize(process.env.DATABASE_URL, config)
-  : new Sequelize(config.database, config.username, config.password, config);
+// Load database URL from environment variables
+const databaseUrl = process.env.DATABASE_URL;
 
-const db = {};
-db.Sequelize = Sequelize;
-db.sequelize = sequelize;
+if (!databaseUrl) {
+  console.error("❌ DATABASE_URL is not set. Check your Railway environment variables.");
+  process.exit(1); // Stop the app if the database URL is missing
+}
 
-db.User = require("./User")(sequelize, Sequelize);
-db.Artwork = require("./Artwork")(sequelize, Sequelize);
+// Initialize Sequelize with SSL support for Railway
+const sequelize = new Sequelize(databaseUrl, {
+  dialect: "postgres",
+  dialectOptions: process.env.NODE_ENV === "production" ? {
+    ssl: {
+      require: true,
+      rejectUnauthorized: false
+    }
+  } : {}
+});
 
-// Define associations if needed
-db.User.hasMany(db.Artwork, { foreignKey: "artistId" });
-db.Artwork.belongsTo(db.User, { foreignKey: "artistId" });
-
-module.exports = db;
+module.exports = sequelize;
