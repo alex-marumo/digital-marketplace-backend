@@ -207,6 +207,30 @@ app.post('/api/artworks', authenticate, upload.single('image'), async (req, res)
   }
 });
 
+// Upload images for an artwork
+app.post('/api/artworks/:id/images', authenticate, upload.array('images', 5), async (req, res) => {
+  if (req.user.role !== 'artist') return res.status(403).json({ error: 'Only artists can upload images' });
+
+  const artworkId = req.params.id;
+  if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No images uploaded' });
+
+  try {
+    const artwork = await pool.query('SELECT * FROM artworks WHERE artwork_id = $1 AND artist_id = $2', [artworkId, req.user.user_id]);
+
+    if (artwork.rows.length === 0) return res.status(404).json({ error: 'Artwork not found or unauthorized' });
+
+    const imagePaths = req.files.map(file => file.path);
+    const values = imagePaths.map(path => `(${artworkId}, '${path}')`).join(',');
+
+    await pool.query(`INSERT INTO artwork_images (artwork_id, image_path) VALUES ${values}`);
+
+    res.json({ message: 'Images uploaded successfully', images: imagePaths });
+  } catch (error) {
+    console.error('Upload Images Error:', error);
+    res.status(500).json({ error: 'Database error', details: error.message });
+  }
+});
+
 // Fetch Artworks
 app.get('/api/artworks', async (req, res) => {
   try {
