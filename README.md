@@ -99,7 +99,7 @@ The server will start on `http://localhost:3000`.
 5. Open a pull request
 
 ## **📜 License**
-This project is open-source under the **MIT License**.
+This project is open-source under the **Non-Existent**.
 
 ---
 ### **📌 Let's Build an Amazing Digital Marketplace Together! 🚀**
