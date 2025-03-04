@@ -216,17 +216,13 @@ app.post('/api/artworks/:id/images', authenticate, upload.array('images', 5), as
 
   try {
     const artwork = await pool.query('SELECT * FROM artworks WHERE artwork_id = $1 AND artist_id = $2', [artworkId, req.user.user_id]);
-
     if (artwork.rows.length === 0) return res.status(404).json({ error: 'Artwork not found or unauthorized' });
 
-    const imagePaths = req.files.map(file => file.path);
-    const values = imagePaths.map(path => `(${artworkId}, '${path}')`).join(',');
-
+    const values = req.files.map(file => `(${artworkId}, '${file.path}')`).join(',');
     await pool.query(`INSERT INTO artwork_images (artwork_id, image_path) VALUES ${values}`);
 
-    res.json({ message: 'Images uploaded successfully', images: imagePaths });
+    res.json({ message: 'Images uploaded successfully', images: req.files.map(file => file.path) });
   } catch (error) {
-    console.error('Upload Images Error:', error);
     res.status(500).json({ error: 'Database error', details: error.message });
   }
 });
@@ -234,21 +230,32 @@ app.post('/api/artworks/:id/images', authenticate, upload.array('images', 5), as
 // Fetch Artworks
 app.get('/api/artworks', async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM artworks');
-    res.json(rows);
+  const { rows } = await pool.query(`
+        SELECT a.*, COALESCE(json_agg(ai.image_path) FILTER (WHERE ai.image_path IS NOT NULL), '[]') AS images
+        FROM artworks a
+        LEFT JOIN artwork_images ai ON a.artwork_id = ai.artwork_id
+        GROUP BY a.artwork_id
+    `);
+  res.json(rows);
   } catch (error) {
-    res.status(500).json({ error: 'Database error' });
+  res.status(500).json({ error: 'Database error', details: error.message });
   }
 });
 
 // Fetch single artwork
 app.get('/api/artworks/:id', async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM artworks WHERE artwork_id = $1', [req.params.id]);
-    if (rows.length === 0) return res.status(404).json({ error: 'Artwork not found' });
-    res.json(rows[0]);
+  const { rows } = await pool.query(`
+        SELECT a.*, COALESCE(json_agg(ai.image_path) FILTER (WHERE ai.image_path IS NOT NULL), '[]') AS images
+        FROM artworks a
+        LEFT JOIN artwork_images ai ON a.artwork_id = ai.artwork_id
+        WHERE a.artwork_id = $1
+        GROUP BY a.artwork_id
+    `, [req.params.id]);
+  if (rows.length === 0) return res.status(404).json({ error: 'Artwork not found' });
+  res.json(rows[0]);
   } catch (error) {
-    res.status(500).json({ error: 'Database error', details: error.message });
+  res.status(500).json({ error: 'Database error', details: error.message });
   }
 });
 
@@ -330,16 +337,21 @@ app.put('/api/categories/:id', authenticate, async (req, res) => {
 app.post('/api/search', async (req, res) => {
   const { query } = req.body;
   try {
-    const { rows } = await pool.query(
-      `SELECT a.*, ar.name as artist_name, c.name as category_name FROM artworks a
-      JOIN artists ar ON a.artist_id = ar.user_id
-      JOIN categories c ON a.category_id = c.category_id
-      WHERE a.title ILIKE $1 OR ar.name ILIKE $1 OR c.name ILIKE $1`,
-      [`%${query}%`]
-    );
+  const { rows } = await pool.query(`
+        SELECT a.*, 
+               ar.name AS artist_name, 
+               c.name AS category_name,
+               COALESCE(json_agg(ai.image_path) FILTER (WHERE ai.image_path IS NOT NULL), '[]') AS images
+        FROM artworks a
+        JOIN artists ar ON a.user_id = a.artist_id
+        JOIN categories c ON a.category_id = c.category_id
+        LEFT JOIN artwork_images ai ON a.artwork_id = ai.artwork_id
+        WHERE a.title ILIKE $1 OR ar.name ILIKE $1 OR c.name ILIKE $1
+        GROUP BY a.artwork_id, ar.name, c.name
+    `, [`%${query}%`]);
     res.json(rows);
   } catch (error) {
-    res.status(500).json({ error: 'Database error', details: error.message });
+  res.status(500).json({ error: 'Database error', details: error.message });
   }
 });
 
