@@ -7,7 +7,7 @@ const multer = require('multer');
 const path = require('path');
 const { Pool } = require('pg');
 const cors = require('cors');
-//testing
+
 const app = express();
 const port = process.env.PORT || 3000;
 
