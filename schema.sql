@@ -145,6 +145,43 @@ ALTER SEQUENCE public.categories_category_id_seq OWNED BY public.categories.cate
 
 
 --
+-- Name: messages; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.messages (
+    message_id integer NOT NULL,
+    sender_id integer NOT NULL,
+    receiver_id integer NOT NULL,
+    content text NOT NULL,
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+ALTER TABLE public.messages OWNER TO postgres;
+
+--
+-- Name: messages_message_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.messages_message_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.messages_message_id_seq OWNER TO postgres;
+
+--
+-- Name: messages_message_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.messages_message_id_seq OWNED BY public.messages.message_id;
+
+
+--
 -- Name: order_items; Type: TABLE; Schema: public; Owner: postgres
 --
 
@@ -262,6 +299,45 @@ ALTER SEQUENCE public.payments_payment_id_seq OWNED BY public.payments.payment_i
 
 
 --
+-- Name: reviews; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.reviews (
+    review_id integer NOT NULL,
+    artwork_id integer NOT NULL,
+    user_id integer NOT NULL,
+    rating integer NOT NULL,
+    comment text,
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT reviews_rating_check CHECK (((rating >= 1) AND (rating <= 5)))
+);
+
+
+ALTER TABLE public.reviews OWNER TO postgres;
+
+--
+-- Name: reviews_review_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.reviews_review_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.reviews_review_id_seq OWNER TO postgres;
+
+--
+-- Name: reviews_review_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.reviews_review_id_seq OWNED BY public.reviews.review_id;
+
+
+--
 -- Name: users; Type: TABLE; Schema: public; Owner: postgres
 --
 
@@ -322,6 +398,13 @@ ALTER TABLE ONLY public.categories ALTER COLUMN category_id SET DEFAULT nextval(
 
 
 --
+-- Name: messages message_id; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.messages ALTER COLUMN message_id SET DEFAULT nextval('public.messages_message_id_seq'::regclass);
+
+
+--
 -- Name: order_items order_item_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
@@ -340,6 +423,13 @@ ALTER TABLE ONLY public.orders ALTER COLUMN order_id SET DEFAULT nextval('public
 --
 
 ALTER TABLE ONLY public.payments ALTER COLUMN payment_id SET DEFAULT nextval('public.payments_payment_id_seq'::regclass);
+
+
+--
+-- Name: reviews review_id; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.reviews ALTER COLUMN review_id SET DEFAULT nextval('public.reviews_review_id_seq'::regclass);
 
 
 --
@@ -390,6 +480,14 @@ ALTER TABLE ONLY public.categories
 
 
 --
+-- Name: messages messages_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT messages_pkey PRIMARY KEY (message_id);
+
+
+--
 -- Name: order_items order_items_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -411,6 +509,14 @@ ALTER TABLE ONLY public.orders
 
 ALTER TABLE ONLY public.payments
     ADD CONSTRAINT payments_pkey PRIMARY KEY (payment_id);
+
+
+--
+-- Name: reviews reviews_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.reviews
+    ADD CONSTRAINT reviews_pkey PRIMARY KEY (review_id);
 
 
 --
@@ -462,6 +568,22 @@ ALTER TABLE ONLY public.artworks
 
 
 --
+-- Name: messages messages_receiver_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT messages_receiver_id_fkey FOREIGN KEY (receiver_id) REFERENCES public.users(user_id) ON DELETE CASCADE;
+
+
+--
+-- Name: messages messages_sender_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT messages_sender_id_fkey FOREIGN KEY (sender_id) REFERENCES public.users(user_id) ON DELETE CASCADE;
+
+
+--
 -- Name: order_items order_items_artwork_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -491,6 +613,22 @@ ALTER TABLE ONLY public.orders
 
 ALTER TABLE ONLY public.payments
     ADD CONSTRAINT payments_order_id_fkey FOREIGN KEY (order_id) REFERENCES public.orders(order_id) ON DELETE CASCADE;
+
+
+--
+-- Name: reviews reviews_artwork_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.reviews
+    ADD CONSTRAINT reviews_artwork_id_fkey FOREIGN KEY (artwork_id) REFERENCES public.artworks(artwork_id) ON DELETE CASCADE;
+
+
+--
+-- Name: reviews reviews_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.reviews
+    ADD CONSTRAINT reviews_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(user_id) ON DELETE CASCADE;
 
 
 --
@@ -529,6 +667,13 @@ GRANT ALL ON TABLE public.categories TO marketplace_user;
 
 
 --
+-- Name: TABLE messages; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON TABLE public.messages TO marketplace_user;
+
+
+--
 -- Name: TABLE order_items; Type: ACL; Schema: public; Owner: postgres
 --
 
@@ -547,6 +692,13 @@ GRANT ALL ON TABLE public.orders TO marketplace_user;
 --
 
 GRANT ALL ON TABLE public.payments TO marketplace_user;
+
+
+--
+-- Name: TABLE reviews; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON TABLE public.reviews TO marketplace_user;
 
 
 --
