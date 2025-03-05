@@ -35,6 +35,41 @@ CREATE TABLE public.artists (
 ALTER TABLE public.artists OWNER TO postgres;
 
 --
+-- Name: artwork_images; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.artwork_images (
+    image_id integer NOT NULL,
+    artwork_id integer NOT NULL,
+    image_path text NOT NULL
+);
+
+
+ALTER TABLE public.artwork_images OWNER TO postgres;
+
+--
+-- Name: artwork_images_image_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.artwork_images_image_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.artwork_images_image_id_seq OWNER TO postgres;
+
+--
+-- Name: artwork_images_image_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.artwork_images_image_id_seq OWNED BY public.artwork_images.image_id;
+
+
+--
 -- Name: artworks; Type: TABLE; Schema: public; Owner: postgres
 --
 
@@ -266,6 +301,13 @@ ALTER SEQUENCE public.users_user_id_seq OWNED BY public.users.user_id;
 
 
 --
+-- Name: artwork_images image_id; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.artwork_images ALTER COLUMN image_id SET DEFAULT nextval('public.artwork_images_image_id_seq'::regclass);
+
+
+--
 -- Name: artworks artwork_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
@@ -313,6 +355,14 @@ ALTER TABLE ONLY public.users ALTER COLUMN user_id SET DEFAULT nextval('public.u
 
 ALTER TABLE ONLY public.artists
     ADD CONSTRAINT artists_pkey PRIMARY KEY (user_id);
+
+
+--
+-- Name: artwork_images artwork_images_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.artwork_images
+    ADD CONSTRAINT artwork_images_pkey PRIMARY KEY (image_id);
 
 
 --
@@ -388,6 +438,14 @@ ALTER TABLE ONLY public.artists
 
 
 --
+-- Name: artwork_images artwork_images_artwork_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.artwork_images
+    ADD CONSTRAINT artwork_images_artwork_id_fkey FOREIGN KEY (artwork_id) REFERENCES public.artworks(artwork_id) ON DELETE CASCADE;
+
+
+--
 -- Name: artworks artworks_artist_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -447,6 +505,13 @@ GRANT USAGE ON SCHEMA public TO marketplace_user;
 --
 
 GRANT ALL ON TABLE public.artists TO marketplace_user;
+
+
+--
+-- Name: TABLE artwork_images; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON TABLE public.artwork_images TO marketplace_user;
 
 
 --
