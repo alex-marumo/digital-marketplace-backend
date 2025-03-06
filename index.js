@@ -361,22 +361,24 @@ app.post('/api/search', async (req, res) => {
   const { query } = req.body;
   try {
   const { rows } = await pool.query(`
-        SELECT a.*, 
-               ar.name AS artist_name, 
-               c.name AS category_name,
-               COALESCE(json_agg(ai.image_path) FILTER (WHERE ai.image_path IS NOT NULL), '[]') AS images
-        FROM artworks a
-        JOIN artists ar ON a.user_id = a.artist_id
-        JOIN categories c ON a.category_id = c.category_id
-        LEFT JOIN artwork_images ai ON a.artwork_id = ai.artwork_id
-        WHERE a.title ILIKE $1 OR ar.name ILIKE $1 OR c.name ILIKE $1
-        GROUP BY a.artwork_id, ar.name, c.name
-    `, [`%${query}%`]);
-    res.json(rows);
-  } catch (error) {
-  res.status(500).json({ error: 'Database error', details: error.message });
+    SELECT a.*, 
+      u.name AS artist_name,  -- Get artist name from users table
+      c.name AS category_name,
+      COALESCE(json_agg(ai.image_path) FILTER (WHERE ai.image_path IS NOT NULL), '[]') AS images
+      FROM artworks a
+      JOIN artists ar ON a.artist_id = ar.user_id  -- Link artwork to the artist
+      JOIN users u ON ar.user_id = u.user_id       -- Get artist's name from users
+      JOIN categories c ON a.category_id = c.category_id
+      LEFT JOIN artwork_images ai ON a.artwork_id = ai.artwork_id
+      WHERE a.title ILIKE $1 OR u.name ILIKE $1 OR c.name ILIKE $1
+      GROUP BY a.artwork_id, u.name, c.name;
+      `,[`%${query}%`]);
+      res.json(rows);
+    } catch (error) {
+      res.status(500).json({ error: 'Database error', details: error.message });
+    }
   }
-});
+);
 
 // Place Order
 app.post('/api/orders', authenticate, async (req, res) => {
