@@ -8,9 +8,16 @@ const path = require('path');
 const { Pool } = require('pg');
 const cors = require('cors');
 
+const swaggerUI = require('swagger-ui-express');
+const fs = require('fs');
+
+const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json'); // Path to your JSON file
+const swaggerData = JSON.parse(fs.readFileSync(swaggerFile, 'utf8'));
+
 const app = express();
 const port = process.env.PORT || 3000;
 
+app.use('/api-docs', swaggerUI.serve, swaggerUI.setup(swaggerData));
 app.use(express.json());
 app.use(cors(
   //origin: 'http://your-frontend-domain.com'
@@ -195,15 +202,31 @@ app.put('/api/artists/:id', authenticate, async (req, res) => {
 app.post('/api/artworks', authenticate, upload.single('image'), async (req, res) => {
   if (req.user.role !== 'artist') return res.status(403).json({ error: 'Only artists can add artworks' });
   const { title, description, price, category_id } = req.body;
+
+  // Ensure an image is provided
+  if (!req.file) {
+    return res.status(400).json({ error: 'At least one image is required to create an artwork' });
+  }
+
   try {
-    const imagePath = req.file?.path || null;
-    const { rows } = await pool.query(
-      'INSERT INTO artworks (title, description, price, user_id, category_id, image_path) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [title, description, price, req.user.user_id, category_id, imagePath]
+    // Step 1: Insert the artwork into artworks table
+    const artworkResult = await pool.query(
+      'INSERT INTO artworks (title, description, price, artist_id, category_id) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [title, description, price, req.user.user_id, category_id]
     );
-    res.status(201).json(rows[0]);
+    const artwork = artworkResult.rows[0];
+
+    // Step 2: Insert the required image into artwork_images
+    const imagePath = req.file.path;
+    await pool.query(
+      'INSERT INTO artwork_images (artwork_id, image_path) VALUES ($1, $2)',
+      [artwork.artwork_id, imagePath]
+    );
+
+    res.status(201).json(artwork);
   } catch (error) {
-    res.status(500).json({ error: 'Database error' });
+    console.error('Database error:', error.message);
+    res.status(500).json({ error: 'Database error', details: error.message });
   }
 });
 
