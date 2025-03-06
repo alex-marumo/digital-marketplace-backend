@@ -994,7 +994,7 @@
     },
     "/api/artworks": {
       "post": {
-        "summary": "Add a new artwork. JWT authentication required",
+        "summary": "Add a new artwork",
         "security": [
           {
             "BearerAuth": []
@@ -1007,31 +1007,30 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "image": {
-                    "type": "string",
-                    "format": "binary",
-                    "description": "Primary image file for the artwork (optional)"
-                  },
                   "title": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Title of the artwork"
                   },
-                  "description": {
-                    "type": "string"
+                 "description": {
+                    "type": "string",
+                    "description": "Description of the artwork"
                   },
                   "price": {
                     "type": "number",
-                    "format": "float"
+                    "format": "float",
+                    "description": "Price of the artwork"
                   },
                   "category_id": {
-                    "type": "integer"
+                    "type": "integer",
+                    "description": "Foreign key referencing categories.category_id"
+                  },
+                  "image": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "Required initial image file for the artwork"
                   }
                 },
-                "required": [
-                  "title",
-                  "description",
-                  "price",
-                  "category_id"
-                ]
+                "required": ["title", "price", "category_id", "image"]
               }
             }
           }
@@ -1042,13 +1041,28 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Artwork"
+                 "$ref": "#/components/schemas/Artwork"
                 }
               }
             }
           },
-          "403": {
-            "description": "Only artists can add artworks",
+        "400": {
+          "description": "Missing required fields or image",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "error": {
+                   "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "403": {
+          "description": "Only artists can add artworks",
             "content": {
               "application/json": {
                 "schema": {
@@ -1057,57 +1071,6 @@
                     "error": {
                       "type": "string"
                     }
-                  }
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Database error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "error": {
-                      "type": "string"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      },
-      "get": {
-        "summary": "Get all artworks with optional filtering",
-        "parameters": [
-          {
-            "name": "category",
-            "in": "query",
-            "schema": {
-              "type": "integer"
-            },
-            "description": "Filter by category ID"
-          },
-          {
-            "name": "artist",
-            "in": "query",
-            "schema": {
-              "type": "integer"
-            },
-            "description": "Filter by artist ID"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "List of artworks with images",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Artwork"
                   }
                 }
               }
