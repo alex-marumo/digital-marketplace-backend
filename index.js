@@ -199,7 +199,7 @@ app.put('/api/artists/:id', authenticate, async (req, res) => {
 });
 
 // Add Artwork
-app.post('/api/artworks', upload.single('image'), authenticate, async (req, res) => {
+app.post('/api/artworks', authenticate, upload.single('image'), async (req, res) => {
   if (req.user.role !== 'artist') return res.status(403).json({ error: 'Only artists can add artworks' });
   const { title, description, price, category_id } = req.body;
 
@@ -215,6 +215,11 @@ app.post('/api/artworks', upload.single('image'), authenticate, async (req, res)
   }
 });
 
+/**
+ * Validates if the provided category_id exists in the database.
+ * @param {number} category_id - The ID of the category to validate.
+ * @throws Will throw an error if the category_id does not exist.
+ */
 const validateCategory = async (category_id) => {
   const categoryResult = await pool.query('SELECT * FROM categories WHERE category_id = $1', [category_id]);
   if (categoryResult.rows.length === 0) {
