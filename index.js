@@ -199,36 +199,50 @@ app.put('/api/artists/:id', authenticate, async (req, res) => {
 });
 
 // Add Artwork
-app.post('/api/artworks', authenticate, upload.single('image'), async (req, res) => {
+app.post('/api/artworks', upload.single('image'), authenticate, async (req, res) => {
   if (req.user.role !== 'artist') return res.status(403).json({ error: 'Only artists can add artworks' });
   const { title, description, price, category_id } = req.body;
 
-  // Ensure an image is provided
-  if (!req.file) {
-    return res.status(400).json({ error: 'At least one image is required to create an artwork' });
-  }
-
   try {
-    // Step 1: Insert the artwork into artworks table
-    const artworkResult = await pool.query(
-      'INSERT INTO artworks (title, description, price, artist_id, category_id) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [title, description, price, req.user.user_id, category_id]
-    );
-    const artwork = artworkResult.rows[0];
-
-    // Step 2: Insert the required image into artwork_images
-    const imagePath = req.file.path;
-    await pool.query(
-      'INSERT INTO artwork_images (artwork_id, image_path) VALUES ($1, $2)',
-      [artwork.artwork_id, imagePath]
-    );
-
+    await validateCategory(category_id);
+    const imagePath = validateImage(req.file);
+    const artwork = await insertArtwork(title, description, price, req.user.user_id, category_id);
+    await insertArtworkImage(artwork.artwork_id, imagePath);
     res.status(201).json(artwork);
   } catch (error) {
     console.error('Database error:', error.message);
     res.status(500).json({ error: 'Database error', details: error.message });
   }
 });
+
+const validateCategory = async (category_id) => {
+  const categoryResult = await pool.query('SELECT * FROM categories WHERE category_id = $1', [category_id]);
+  if (categoryResult.rows.length === 0) {
+    throw new Error('Invalid category ID');
+  }
+};
+
+const validateImage = (file) => {
+  if (!file) {
+    throw new Error('At least one image is required to create an artwork');
+  }
+  return path.normalize(file.path).replace(/^(\.\.(\/|\\|$))+/, '');
+};
+
+const insertArtwork = async (title, description, price, user_id, category_id) => {
+  const artworkResult = await pool.query(
+    'INSERT INTO artworks (title, description, price, artist_id, category_id) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+    [title, description, price, user_id, category_id]
+  );
+  return artworkResult.rows[0];
+};
+
+const insertArtworkImage = async (artwork_id, imagePath) => {
+  await pool.query(
+    'INSERT INTO artwork_images (artwork_id, image_path) VALUES ($1, $2)',
+    [artwork_id, imagePath]
+  );
+};
 
 // Upload images for an artwork
 app.post('/api/artworks/:id/images', authenticate, upload.array('images', 5), async (req, res) => {
