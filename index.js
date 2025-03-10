@@ -8,9 +8,16 @@ const path = require('path');
 const { Pool } = require('pg');
 const cors = require('cors');
 
+const swaggerUI = require('swagger-ui-express');
+const fs = require('fs');
+
+const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json'); // Path to your JSON file
+const swaggerData = JSON.parse(fs.readFileSync(swaggerFile, 'utf8'));
+
 const app = express();
 const port = process.env.PORT || 3000;
 
+app.use('/api-docs', swaggerUI.serve, swaggerUI.setup(swaggerData));
 app.use(express.json());
 app.use(cors(
   //origin: 'http://your-frontend-domain.com'
@@ -195,17 +202,52 @@ app.put('/api/artists/:id', authenticate, async (req, res) => {
 app.post('/api/artworks', authenticate, upload.single('image'), async (req, res) => {
   if (req.user.role !== 'artist') return res.status(403).json({ error: 'Only artists can add artworks' });
   const { title, description, price, category_id } = req.body;
+
   try {
-    const imagePath = req.file?.path || null;
-    const { rows } = await pool.query(
-      'INSERT INTO artworks (title, description, price, user_id, category_id, image_path) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [title, description, price, req.user.user_id, category_id, imagePath]
-    );
-    res.status(201).json(rows[0]);
+    await validateCategory(category_id);
+    const imagePath = validateImage(req.file);
+    const artwork = await insertArtwork(title, description, price, req.user.user_id, category_id);
+    await insertArtworkImage(artwork.artwork_id, imagePath);
+    res.status(201).json(artwork);
   } catch (error) {
-    res.status(500).json({ error: 'Database error' });
+    console.error('Database error:', error.message);
+    res.status(500).json({ error: 'Database error', details: error.message });
   }
 });
+
+/**
+ * Validates if the provided category_id exists in the database.
+ * @param {number} category_id - The ID of the category to validate.
+ * @throws Will throw an error if the category_id does not exist.
+ */
+const validateCategory = async (category_id) => {
+  const categoryResult = await pool.query('SELECT * FROM categories WHERE category_id = $1', [category_id]);
+  if (categoryResult.rows.length === 0) {
+    throw new Error('Invalid category ID');
+  }
+};
+
+const validateImage = (file) => {
+  if (!file) {
+    throw new Error('At least one image is required to create an artwork');
+  }
+  return path.normalize(file.path).replace(/^(\.\.(\/|\\|$))+/, '');
+};
+
+const insertArtwork = async (title, description, price, user_id, category_id) => {
+  const artworkResult = await pool.query(
+    'INSERT INTO artworks (title, description, price, artist_id, category_id) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+    [title, description, price, user_id, category_id]
+  );
+  return artworkResult.rows[0];
+};
+
+const insertArtworkImage = async (artwork_id, imagePath) => {
+  await pool.query(
+    'INSERT INTO artwork_images (artwork_id, image_path) VALUES ($1, $2)',
+    [artwork_id, imagePath]
+  );
+};
 
 // Upload images for an artwork
 app.post('/api/artworks/:id/images', authenticate, upload.array('images', 5), async (req, res) => {
@@ -338,22 +380,24 @@ app.post('/api/search', async (req, res) => {
   const { query } = req.body;
   try {
   const { rows } = await pool.query(`
-        SELECT a.*, 
-               ar.name AS artist_name, 
-               c.name AS category_name,
-               COALESCE(json_agg(ai.image_path) FILTER (WHERE ai.image_path IS NOT NULL), '[]') AS images
-        FROM artworks a
-        JOIN artists ar ON a.user_id = a.artist_id
-        JOIN categories c ON a.category_id = c.category_id
-        LEFT JOIN artwork_images ai ON a.artwork_id = ai.artwork_id
-        WHERE a.title ILIKE $1 OR ar.name ILIKE $1 OR c.name ILIKE $1
-        GROUP BY a.artwork_id, ar.name, c.name
-    `, [`%${query}%`]);
-    res.json(rows);
-  } catch (error) {
-  res.status(500).json({ error: 'Database error', details: error.message });
+    SELECT a.*, 
+      u.name AS artist_name,  -- Get artist name from users table
+      c.name AS category_name,
+      COALESCE(json_agg(ai.image_path) FILTER (WHERE ai.image_path IS NOT NULL), '[]') AS images
+      FROM artworks a
+      JOIN artists ar ON a.artist_id = ar.user_id  -- Link artwork to the artist
+      JOIN users u ON ar.user_id = u.user_id       -- Get artist's name from users
+      JOIN categories c ON a.category_id = c.category_id
+      LEFT JOIN artwork_images ai ON a.artwork_id = ai.artwork_id
+      WHERE a.title ILIKE $1 OR u.name ILIKE $1 OR c.name ILIKE $1
+      GROUP BY a.artwork_id, u.name, c.name;
+      `,[`%${query}%`]);
+      res.json(rows);
+    } catch (error) {
+      res.status(500).json({ error: 'Database error', details: error.message });
+    }
   }
-});
+);
 
 // Place Order
 app.post('/api/orders', authenticate, async (req, res) => {
