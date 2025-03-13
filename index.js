@@ -1,13 +1,14 @@
 require('dotenv').config();
+console.log('DATABASE_URL:', process.env.DATABASE_URL);
 const express = require('express');
 const bodyParser = require('body-parser');
-const bcrypt = require('bcrypt');
 const multer = require('multer');
 const path = require('path');
 const { Pool } = require('pg');
 const cors = require('cors');
 const session = require('express-session');
-const { keycloak, memoryStore } = require('./keycloak'); // Assumes Keycloak config is in a separate file
+const PostgreSqlStore = require('connect-pg-simple')(session); // For PostgreSQL sessions
+const { keycloak } = require('./keycloak'); // Keycloak setup
 
 const swaggerUI = require('swagger-ui-express');
 const fs = require('fs');
@@ -18,38 +19,22 @@ const swaggerData = JSON.parse(fs.readFileSync(swaggerFile, 'utf8'));
 const app = express();
 const port = process.env.PORT || 3000;
 
+// Connect to PostgreSQL
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+});
+
 // Middleware setup
 app.use('/api-docs', swaggerUI.serve, swaggerUI.setup(swaggerData));
 app.use(express.json());
 app.use(cors());
 app.use(bodyParser.json());
 
-// Session middleware for Keycloak
-app.use(session({
-  secret: process.env.SESSION_SECRET || 'my-secret-key',
-  resave: false,
-  saveUninitialized: true,
-  store: memoryStore
-}));
-
 // Keycloak middleware
 app.use(keycloak.middleware());
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-});
-
-// Database connection check
-pool.query('SELECT NOW()', (err, res) => {
-  if (err) {
-    console.error('❌ Error connecting to the database:', err);
-  } else {
-    console.log('✅ Database connected successfully at', res.rows[0].now);
-  }
-});
-
-// Multer setup for file uploads
+// Multer for file uploads
 const storage = multer.diskStorage({
   destination: './uploads/',
   filename: (req, file, cb) => {
@@ -63,9 +48,20 @@ const upload = multer({ storage });
 // Fetch User Profile (Authenticated)
 app.get('/api/users/me', keycloak.protect(), async (req, res) => {
   try {
-    const userId = req.kauth.grant.access_token.content.sub; // Keycloak user ID
-    const { rows } = await pool.query('SELECT user_id, name, email, role FROM users WHERE user_id = $1', [userId]);
-    if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    const keycloakId = req.kauth.grant.access_token.content.sub;
+    const { rows } = await pool.query(
+      'SELECT user_id, name, email, role FROM users WHERE keycloak_id = $1',
+      [keycloakId]
+    );
+    if (rows.length === 0) {
+      const userName = req.kauth.grant.access_token.content.name || 'Unknown';
+      const userEmail = req.kauth.grant.access_token.content.email || 'unknown@example.com';
+      const { rows: newUser } = await pool.query(
+        'INSERT INTO users (keycloak_id, name, email, role) VALUES ($1, $2, $3, $4) RETURNING user_id, name, email, role',
+        [keycloakId, userName, userEmail, 'buyer']
+      );
+      return res.json(newUser[0]);
+    }
     res.json(rows[0]);
   } catch (error) {
     res.status(500).json({ error: 'Database error', details: error.message });
@@ -75,7 +71,7 @@ app.get('/api/users/me', keycloak.protect(), async (req, res) => {
 // Update User Profile (Authenticated)
 app.put('/api/users/me', keycloak.protect(), async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
-  const { name, email, password } = req.body;
+  const { name, email } = req.body;
   try {
     let query = 'UPDATE users SET';
     const values = [];
@@ -88,12 +84,8 @@ app.put('/api/users/me', keycloak.protect(), async (req, res) => {
       values.push(email);
       query += ` email = $${values.length},`;
     }
-    if (password) {
-      const hashedPassword = await bcrypt.hash(password, 10);
-      values.push(hashedPassword);
-      query += ` password = $${values.length},`;
-    }
     
+    // Remove trailing comma and complete the query
     query = query.slice(0, -1) + ` WHERE user_id = $${values.length + 1} RETURNING user_id, name, email`;
     values.push(userId);
 
