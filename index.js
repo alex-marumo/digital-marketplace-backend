@@ -4,14 +4,19 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const multer = require('multer');
 const path = require('path');
-const { Pool } = require('pg');
 const cors = require('cors');
-const session = require('express-session');
-const PostgreSqlStore = require('connect-pg-simple')(session); // For PostgreSQL sessions
-const { keycloak } = require('./keycloak'); // Keycloak setup
-
+const { keycloak } = require('./keycloak');
+const axios = require('axios');
+const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 const swaggerUI = require('swagger-ui-express');
 const fs = require('fs');
+const { pool } = require('./db'); // Single pool import
+const { sendVerificationEmail } = require('./services/emailService');
+const { createVerificationToken, verifyToken } = require('./services/verificationService');
+const { verifyRecaptcha } = require('./services/recaptchaService');
+const { registrationLimiter } = require('./middleware/rateLimiter');
+const { requireTrustLevel, TRUST_LEVELS, updateUserTrustAfterOrder } = require('./middleware/trustLevel');
 
 const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json');
 const swaggerData = JSON.parse(fs.readFileSync(swaggerFile, 'utf8'));
@@ -19,17 +24,12 @@ const swaggerData = JSON.parse(fs.readFileSync(swaggerFile, 'utf8'));
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Connect to PostgreSQL
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-});
-
 // Middleware setup
 app.use('/api-docs', swaggerUI.serve, swaggerUI.setup(swaggerData));
 app.use(express.json());
 app.use(cors());
 app.use(bodyParser.json());
+app.use(keycloak.middleware());
 
 // Keycloak middleware
 app.use(keycloak.middleware());
@@ -44,6 +44,57 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 // --- User Routes ---
+
+// Pre-registration endpoint (before Keycloak signup)
+app.post('/api/pre-register', registrationLimiter, async (req, res) => {
+  const { recaptchaToken } = req.body;
+  if (!recaptchaToken) return res.status(400).json({ error: 'reCAPTCHA required' });
+
+  const recaptchaResult = await verifyRecaptcha(recaptchaToken);
+  if (!recaptchaResult.success || recaptchaResult.score < 0.5) {
+    return res.status(400).json({ error: 'reCAPTCHA verification failed' });
+  }
+  res.json({ redirect: `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/registrations` });
+});
+
+// Verify email endpoint
+app.get('/api/verify-email', async (req, res) => {
+  const { token } = req.query;
+  if (!token) return res.status(400).json({ error: 'Missing token' });
+
+  const result = await verifyToken(token);
+  if (!result.valid) return res.status(400).json({ error: 'Invalid or expired token' });
+
+  await updateTrustLevel(result.userId, TRUST_LEVELS.VERIFIED);
+  res.json({ message: 'Email verified' });
+});
+
+// Modify /api/users/me to send verification email on first signup
+app.get('/api/users/me', keycloak.protect(), async (req, res) => {
+  const keycloakId = req.kauth.grant.access_token.content.sub;
+  const { rows } = await pool.query(
+    'SELECT user_id, name, email, role, is_verified, trust_level FROM users WHERE keycloak_id = $1',
+    [keycloakId]
+  );
+
+  if (rows.length === 0) {
+    const userName = req.kauth.grant.access_token.content.name || 'Unknown';
+    const userEmail = req.kauth.grant.access_token.content.email || 'unknown@example.com';
+    const { rows: newUser } = await pool.query(
+      'INSERT INTO users (keycloak_id, name, email, role, is_verified, trust_level) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [keycloakId, userName, userEmail, 'buyer', false, TRUST_LEVELS.NEW]
+    );
+    const token = await createVerificationToken(keycloakId);
+    await sendVerificationEmail(newUser[0], token);
+    return res.status(201).json({ message: 'User created, please verify your email', user: newUser[0] });
+  }
+
+  if (!rows[0].is_verified) {
+    return res.status(403).json({ error: 'Please verify your email' });
+  }
+
+  res.json(rows[0]);
+});
 
 // Fetch User Profile (Authenticated)
 app.get('/api/users/me', keycloak.protect(), async (req, res) => {
@@ -323,6 +374,18 @@ app.post('/api/search', async (req, res) => {
 });
 
 // --- Order Routes ---
+
+// Add trust check to sensitive routes (e.g., orders)
+app.post('/api/orders', keycloak.protect('realm:buyer'), requireTrustLevel(TRUST_LEVELS.VERIFIED), async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+  const { artwork_id, total_amount } = req.body;
+  const { rows } = await pool.query(
+    'INSERT INTO orders (buyer_id, artwork_id, total_amount) VALUES ($1, $2, $3) RETURNING *',
+    [userId, artwork_id, total_amount]
+  );
+  await updateUserTrustAfterOrder(userId); // Update trust after order
+  res.status(201).json(rows[0]);
+});
 
 // Place Order (Buyer only)
 app.post('/api/orders', keycloak.protect('realm:buyer'), async (req, res) => {
