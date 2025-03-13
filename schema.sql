@@ -338,6 +338,19 @@ ALTER SEQUENCE public.reviews_review_id_seq OWNED BY public.reviews.review_id;
 
 
 --
+-- Name: sessions; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.sessions (
+    sid character varying NOT NULL,
+    sess json NOT NULL,
+    expire timestamp(6) without time zone NOT NULL
+);
+
+
+ALTER TABLE public.sessions OWNER TO postgres;
+
+--
 -- Name: users; Type: TABLE; Schema: public; Owner: postgres
 --
 
@@ -345,9 +358,9 @@ CREATE TABLE public.users (
     user_id integer NOT NULL,
     name character varying(255) NOT NULL,
     email character varying(255) NOT NULL,
-    password text NOT NULL,
     role character varying(50) NOT NULL,
     created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    keycloak_id uuid,
     CONSTRAINT users_role_check CHECK (((role)::text = ANY ((ARRAY['buyer'::character varying, 'artist'::character varying, 'admin'::character varying])::text[])))
 );
 
@@ -520,6 +533,22 @@ ALTER TABLE ONLY public.reviews
 
 
 --
+-- Name: sessions sessions_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT sessions_pkey PRIMARY KEY (sid);
+
+
+--
+-- Name: users unique_keycloak_id; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT unique_keycloak_id UNIQUE (keycloak_id);
+
+
+--
 -- Name: users users_email_key; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -653,10 +682,24 @@ GRANT ALL ON TABLE public.artwork_images TO marketplace_user;
 
 
 --
+-- Name: SEQUENCE artwork_images_image_id_seq; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON SEQUENCE public.artwork_images_image_id_seq TO marketplace_user;
+
+
+--
 -- Name: TABLE artworks; Type: ACL; Schema: public; Owner: postgres
 --
 
 GRANT ALL ON TABLE public.artworks TO marketplace_user;
+
+
+--
+-- Name: SEQUENCE artworks_artwork_id_seq; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON SEQUENCE public.artworks_artwork_id_seq TO marketplace_user;
 
 
 --
@@ -699,6 +742,13 @@ GRANT ALL ON TABLE public.payments TO marketplace_user;
 --
 
 GRANT ALL ON TABLE public.reviews TO marketplace_user;
+
+
+--
+-- Name: TABLE sessions; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON TABLE public.sessions TO marketplace_user;
 
 
 --
