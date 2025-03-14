@@ -15,7 +15,7 @@ const { pool } = require('./db'); // Single pool import
 const { sendVerificationEmail } = require('./services/emailService');
 const { createVerificationToken, verifyToken } = require('./services/verificationService');
 const { verifyRecaptcha } = require('./services/recaptchaService');
-const { registrationLimiter } = require('./middleware/rateLimiter');
+const { registrationLimiter, orderLimiter } = require('./middleware/rateLimiter');
 const { requireTrustLevel, TRUST_LEVELS, updateUserTrustAfterOrder } = require('./middleware/trustLevel');
 
 const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json');
