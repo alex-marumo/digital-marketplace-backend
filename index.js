@@ -57,7 +57,7 @@ app.post('/api/pre-register', registrationLimiter, async (req, res) => {
 });
 
 // Verify email endpoint
-app.get('/api/verify-email', async (req, res) => {
+app.get('/api/verify-email', registrationLimiter, async (req, res) => {
   const { token } = req.query;
   if (!token) return res.status(400).json({ error: 'Missing token' });
 
