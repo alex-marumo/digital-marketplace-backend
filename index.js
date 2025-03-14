@@ -95,7 +95,7 @@ app.get('/api/users/me', keycloak.protect(), authGetLimiter, async (req, res) =>
   }
 });
 
-app.put('/api/users/me', keycloak.protect(), async (req, res) => {
+app.put('/api/users/me', keycloak.protect(), authPutLimiter, async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   const { name, email } = req.body;
   try {
@@ -125,7 +125,7 @@ app.put('/api/users/me', keycloak.protect(), async (req, res) => {
 
 // --- Artist Routes ---
 
-app.post('/api/artists', keycloak.protect('realm:artist'), async (req, res) => {
+app.post('/api/artists', keycloak.protect('realm:artist'), authPostLimiter, async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   const { bio, portfolio } = req.body;
   try {
@@ -161,7 +161,7 @@ app.get('/api/artists/:id', publicDataLimiter, async (req, res) => {
   }
 });
 
-app.put('/api/artists/:id', keycloak.protect('realm:artist'), async (req, res) => {
+app.put('/api/artists/:id', keycloak.protect('realm:artist'), authPutLimiter, async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   if (userId !== req.params.id) return res.status(403).json({ error: 'Unauthorized' });
   const { bio, portfolio } = req.body;
@@ -255,7 +255,7 @@ app.put('/api/artworks/:id', keycloak.protect('realm:artist'), artworkManagement
   }
 });
 
-app.delete('/api/artworks/:id', keycloak.protect(), artworkManagementLimiter, async (req, res) => {
+app.delete('/api/artworks/:id', keycloak.protect(), authDeleteLimiter, async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   const userRoles = req.kauth.grant.access_token.content.realm_access.roles;
   try {
@@ -273,7 +273,7 @@ app.delete('/api/artworks/:id', keycloak.protect(), artworkManagementLimiter, as
 
 // --- Category Routes ---
 
-app.post('/api/categories', keycloak.protect('realm:admin'), async (req, res) => {
+app.post('/api/categories', keycloak.protect('realm:admin'), authPostLimiter, async (req, res) => {
   const { name, description } = req.body;
   try {
     const { rows } = await pool.query(
@@ -295,7 +295,7 @@ app.get('/api/categories', publicDataLimiter, async (req, res) => {
   }
 });
 
-app.put('/api/categories/:id', keycloak.protect('realm:admin'), async (req, res) => {
+app.put('/api/categories/:id', keycloak.protect('realm:admin'), authPutLimiter, async (req, res) => {
   const { name, description } = req.body;
   try {
     const { rows } = await pool.query(
@@ -350,7 +350,7 @@ app.post('/api/orders', keycloak.protect('realm:buyer'), orderLimiter, requireTr
   }
 });
 
-app.get('/api/orders', keycloak.protect(), async (req, res) => {
+app.get('/api/orders', keycloak.protect(), authGetLimiter, async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   try {
     const { rows } = await pool.query('SELECT * FROM orders WHERE buyer_id = $1', [userId]);
@@ -360,7 +360,7 @@ app.get('/api/orders', keycloak.protect(), async (req, res) => {
   }
 });
 
-app.get('/api/orders/:id', keycloak.protect(), async (req, res) => {
+app.get('/api/orders/:id', keycloak.protect(), authGetLimiter, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM orders WHERE order_id = $1', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ error: 'Order not found' });
@@ -370,7 +370,7 @@ app.get('/api/orders/:id', keycloak.protect(), async (req, res) => {
   }
 });
 
-app.put('/api/orders/:id/status', keycloak.protect('realm:admin'), async (req, res) => {
+app.put('/api/orders/:id/status', keycloak.protect('realm:admin'), authPutLimiter, async (req, res) => {
   const { status } = req.body;
   try {
     const { rows } = await pool.query(
@@ -386,7 +386,7 @@ app.put('/api/orders/:id/status', keycloak.protect('realm:admin'), async (req, r
 
 // --- Order Items Routes ---
 
-app.post('/api/order-items', keycloak.protect(), async (req, res) => {
+app.post('/api/order-items', keycloak.protect(), authPostLimiter, async (req, res) => {
   const { order_id, artwork_id, quantity, price } = req.body;
   try {
     const { rows } = await pool.query(
@@ -399,7 +399,7 @@ app.post('/api/order-items', keycloak.protect(), async (req, res) => {
   }
 });
 
-app.get('/api/order-items/:order_id', keycloak.protect(), async (req, res) => {
+app.get('/api/order-items/:order_id', keycloak.protect(), authGetLimiter, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM order_items WHERE order_id = $1', [req.params.order_id]);
     res.json(rows);
@@ -410,7 +410,7 @@ app.get('/api/order-items/:order_id', keycloak.protect(), async (req, res) => {
 
 // --- Payment Routes ---
 
-app.post('/api/payments', keycloak.protect(), async (req, res) => {
+app.post('/api/payments', keycloak.protect(), authPostLimiter, async (req, res) => {
   const { order_id, amount } = req.body;
   try {
     const { rows } = await pool.query(
@@ -423,7 +423,7 @@ app.post('/api/payments', keycloak.protect(), async (req, res) => {
   }
 });
 
-app.get('/api/payments/:order_id', keycloak.protect(), async (req, res) => {
+app.get('/api/payments/:order_id', keycloak.protect(), authGetLimiter, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM payments WHERE order_id = $1', [req.params.order_id]);
     res.json(rows);
@@ -432,7 +432,7 @@ app.get('/api/payments/:order_id', keycloak.protect(), async (req, res) => {
   }
 });
 
-app.put('/api/payments/:id/status', keycloak.protect('realm:admin'), async (req, res) => {
+app.put('/api/payments/:id/status', keycloak.protect('realm:admin'), authPutLimiter, async (req, res) => {
   const { status } = req.body;
   try {
     const { rows } = await pool.query(
@@ -448,7 +448,7 @@ app.put('/api/payments/:id/status', keycloak.protect('realm:admin'), async (req,
 
 // --- Review Routes ---
 
-app.post('/api/reviews', keycloak.protect('realm:buyer'), async (req, res) => {
+app.post('/api/reviews', keycloak.protect('realm:buyer'), authPostLimiter, async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   const { artwork_id, rating, comment } = req.body;
   try {
