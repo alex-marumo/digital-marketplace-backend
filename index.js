@@ -15,7 +15,10 @@ const { pool } = require('./db');
 const { sendVerificationEmail } = require('./services/emailService');
 const { createVerificationToken, verifyToken } = require('./services/verificationService');
 const { verifyRecaptcha } = require('./services/recaptchaService');
-const { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter } = require('./middleware/rateLimiter');
+
+const { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter } = require('./middleware/rateLimiter');
+console.log('Rate Limiters:', { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter });
+
 const { requireTrustLevel } = require('./middleware/trustLevel');
 const { TRUST_LEVELS, updateTrustLevel, updateUserTrustAfterOrder } = require('./services/trustService');
 

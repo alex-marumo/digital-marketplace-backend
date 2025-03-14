@@ -36,9 +36,40 @@ const artworkManagementLimiter = rateLimit({
 
 const authGetLimiter = rateLimit({
   windowMs: WINDOW_MS,
-  max: 50, // 50 requests per 15 minutes per user
-  message: { error: 'Too many profile requests, please try again later.' },
-  keyGenerator: (req) => req.kauth.grant.access_token.content.sub // Per Keycloak user ID
+  max: 50,
+  message: { error: 'Too many requests, please try again later.' },
+  keyGenerator: (req) => req.kauth.grant.access_token.content.sub
 });
 
-module.exports = { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter };
+const authPostLimiter = rateLimit({
+  windowMs: WINDOW_MS,
+  max: 20,
+  message: { error: 'Too many actions, please try again later.' },
+  keyGenerator: (req) => req.kauth.grant.access_token.content.sub
+});
+
+const authPutLimiter = rateLimit({
+  windowMs: WINDOW_MS,
+  max: 15,
+  message: { error: 'Too many updates, please try again later.' },
+  keyGenerator: (req) => req.kauth.grant.access_token.content.sub
+});
+
+const authDeleteLimiter = rateLimit({
+  windowMs: WINDOW_MS,
+  max: 10,
+  message: { error: 'Too many deletions, please try again later.' },
+  keyGenerator: (req) => req.kauth.grant.access_token.content.sub
+});
+
+module.exports = {
+  registrationLimiter,
+  orderLimiter,
+  publicDataLimiter,
+  messageLimiter,
+  artworkManagementLimiter,
+  authGetLimiter,
+  authPostLimiter,
+  authPutLimiter,
+  authDeleteLimiter
+};
