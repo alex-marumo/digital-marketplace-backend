@@ -1,18 +1,16 @@
-// Import TRUST_LEVELS from the service instead of redeclaring
 const { getTrustLevel, TRUST_LEVELS } = require('../services/trustService');
 
 const requireTrustLevel = (level) => {
-    return (req, res, next) => {
-        if (req.user.trustLevel >= level) {
-            next();
-        } else {
-            res.status(403).json({ error: 'Insufficient trust level' });
-        }
-    };
+  return async (req, res, next) => {
+    const keycloakId = req.kauth.grant.access_token.content.sub;
+    const userTrustLevel = await getTrustLevel(keycloakId);
+    if (userTrustLevel >= level) {
+      req.user = { trustLevel: userTrustLevel, keycloakId }; // Attach for downstream use
+      next();
+    } else {
+      res.status(403).json({ error: 'Insufficient trust level' });
+    }
+  };
 };
 
-const updateUserTrustAfterOrder = async (userId) => {
-    // Implementation for updating user trust level after an order
-};
-
-module.exports = { requireTrustLevel, TRUST_LEVELS, updateUserTrustAfterOrder };
+module.exports = { requireTrustLevel, TRUST_LEVELS };
