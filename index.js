@@ -376,14 +376,14 @@ app.post('/api/search', async (req, res) => {
 // --- Order Routes ---
 
 // Add trust check to sensitive routes (e.g., orders)
-app.post('/api/orders', keycloak.protect('realm:buyer'), requireTrustLevel(TRUST_LEVELS.VERIFIED), async (req, res) => {
+app.post('/api/orders', keycloak.protect('realm:buyer'), orderLimiter, requireTrustLevel(TRUST_LEVELS.VERIFIED), async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   const { artwork_id, total_amount } = req.body;
   const { rows } = await pool.query(
     'INSERT INTO orders (buyer_id, artwork_id, total_amount) VALUES ($1, $2, $3) RETURNING *',
     [userId, artwork_id, total_amount]
   );
-  await updateUserTrustAfterOrder(userId); // Update trust after order
+  await updateUserTrustAfterOrder(userId);
   res.status(201).json(rows[0]);
 });
 
