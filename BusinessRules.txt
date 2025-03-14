@@ -1,0 +1,107 @@
+### **User & Account Management**
+
+- **Unique Registration & Verification:**
+  - Every user must register with a unique, verified email address.
+  - New user records are created automatically on first login via Keycloak (using the Keycloak ID as a unique reference).
+  - Accounts remain unverified until the user verifies their email via a verification link sent by your system.
+  - CAPTCHA is required at the pre-registration stage to reduce automated signups.
+
+- **Role Assignment & RBAC:**
+  - Each user is assigned a role—either “buyer”, “artist”, or “admin”—which governs what actions they can perform.
+  - Keycloak is used to authenticate and issue JWT tokens that include these role claims.
+  - Endpoints enforce role restrictions; for example, only users with the "artist" role can create or modify artworks, while only "buyers" can place orders.
+
+- **Trust Level & Reputation:**
+  - New accounts start with a low trust level (e.g., “unverified”).
+  - Trust levels are updated once a user verifies their email and completes verified actions (like successful orders).
+  - Certain sensitive actions (like placing orders) may require a minimum trust level.
+
+---
+
+### **Data Integrity & Consistency**
+
+- **Database Constraints:**
+  - Foreign key relationships enforce that artworks reference an existing category and an artist.
+  - Orders must reference valid buyer and artwork records.
+  - Payment records must correctly reference an order, and order items must reference both an order and a valid artwork.
+
+- **Audit Logging:**
+  - Critical actions such as account updates, order placements, and payment updates are logged to ensure an audit trail for troubleshooting and dispute resolution.
+  - These logs help maintain data integrity and verify that transactions follow the expected workflows.
+
+---
+
+### **Order, Payment & Transaction Workflow**
+
+- **Order Processing:**
+  - Only verified buyers can place orders.
+  - Orders follow a fixed lifecycle (e.g., “pending” → “completed” or “canceled”) and cannot be arbitrarily modified.
+  - Each order is linked to specific order items and payment records, ensuring traceability.
+
+- **Payment Management:**
+  - Payments are recorded as separate entities and must be associated with a valid order.
+  - Payment statuses are strictly controlled (e.g., “pending”, “completed”, “failed”) and only admins can update them.
+  - Inconsistencies trigger alerts for manual review.
+
+---
+
+### **Artwork & Media Handling**
+
+- **Artwork Data:**
+  - Every artwork must have a title, price, category, and a reference to the artist.
+  - Artworks can have multiple images; the image paths are stored in an associated table.
+  - Endpoints ensure that images are correctly linked to their artwork, and every artwork should have at least one image.
+
+- **Image Storage:**
+  - Uploaded images are stored in a server folder, and their file paths are saved in the database.
+  - Each artwork image has a unique identifier and is linked via a foreign key to its artwork.
+
+---
+
+### **Reviews & Messaging**
+
+- **Reviews:**
+  - Reviews can only be submitted by users with the “buyer” role who have purchased the artwork.
+  - Reviews include a rating (1–5) and optional comments; they must be stored with a reference to both the artwork and the reviewer.
+  
+- **Messaging:**
+  - Only authenticated users can send messages to one another.
+  - Each message is stored with sender and receiver IDs, ensuring accountability.
+  - There may be rules (such as content length or profanity filters) to keep communications respectful.
+
+---
+
+### **Security & Anti-Abuse Measures**
+
+- **Rate Limiting & CAPTCHA:**
+  - Sensitive endpoints (especially those related to registration) are protected by rate limiting and CAPTCHA to prevent abuse and automated signups.
+  
+- **Data Security:**
+  - Passwords are always stored in a hashed format.
+  - All communications should use HTTPS in production.
+  - Access to sensitive endpoints is protected via Keycloak JWT tokens and validated against expected roles.
+
+- **Session & Token Management:**
+  - Sessions are managed with a secure secret and stored in a PostgreSQL-backed session store.
+  - Tokens must contain correct claims (including roles and user identifiers) before any protected action is allowed.
+
+---
+
+### **Overall Workflow**
+
+1. **User Registration & Login:**  
+   - Users sign in via Keycloak.  
+   - On first login, if a user doesn’t exist in the local database, they are created with default settings (e.g., as a “buyer” and with an “unverified” trust level).  
+   - Email verification and CAPTCHA protect against duplicate or fraudulent accounts.
+
+2. **Role-Based Access & Actions:**  
+   - Buyers can place orders and leave reviews.  
+   - Artists can create and manage artworks (including uploading images).  
+   - Admins have elevated privileges to update order statuses, manage payments, and update categories.
+
+3. **Transaction Integrity & Audit:**  
+   - All orders, payments, and order items are recorded with proper foreign keys and unique identifiers.  
+   - Logs and audit trails are maintained to ensure all critical actions can be reviewed.
+
+4. **Security Enforcement:**  
+   - JWT tokens (via Keycloak) secure all protected endpoints, ensuring only the right users can access their permitted resources.
