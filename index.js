@@ -29,11 +29,10 @@ app.use('/api-docs', swaggerUI.serve, swaggerUI.setup(swaggerData));
 app.use(express.json());
 app.use(cors());
 app.use(bodyParser.json());
-app.use(keycloak.middleware());
 
 // Keycloak middleware
 app.use(keycloak.middleware());
-
+// app.use(keycloak.middleware()); // Duplicate middleware removed
 // Multer for file uploads
 const storage = multer.diskStorage({
   destination: './uploads/',
@@ -69,50 +68,31 @@ app.get('/api/verify-email', async (req, res) => {
   res.json({ message: 'Email verified' });
 });
 
-// Modify /api/users/me to send verification email on first signup
-app.get('/api/users/me', keycloak.protect(), async (req, res) => {
-  const keycloakId = req.kauth.grant.access_token.content.sub;
-  const { rows } = await pool.query(
-    'SELECT user_id, name, email, role, is_verified, trust_level FROM users WHERE keycloak_id = $1',
-    [keycloakId]
-  );
-
-  if (rows.length === 0) {
-    const userName = req.kauth.grant.access_token.content.name || 'Unknown';
-    const userEmail = req.kauth.grant.access_token.content.email || 'unknown@example.com';
-    const { rows: newUser } = await pool.query(
-      'INSERT INTO users (keycloak_id, name, email, role, is_verified, trust_level) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [keycloakId, userName, userEmail, 'buyer', false, TRUST_LEVELS.NEW]
-    );
-    const token = await createVerificationToken(keycloakId);
-    await sendVerificationEmail(newUser[0], token);
-    return res.status(201).json({ message: 'User created, please verify your email', user: newUser[0] });
-  }
-
-  if (!rows[0].is_verified) {
-    return res.status(403).json({ error: 'Please verify your email' });
-  }
-
-  res.json(rows[0]);
-});
-
 // Fetch User Profile (Authenticated)
 app.get('/api/users/me', keycloak.protect(), async (req, res) => {
   try {
     const keycloakId = req.kauth.grant.access_token.content.sub;
     const { rows } = await pool.query(
-      'SELECT user_id, name, email, role FROM users WHERE keycloak_id = $1',
+      'SELECT user_id, name, email, role, is_verified, trust_level FROM users WHERE keycloak_id = $1',
       [keycloakId]
     );
+
     if (rows.length === 0) {
       const userName = req.kauth.grant.access_token.content.name || 'Unknown';
       const userEmail = req.kauth.grant.access_token.content.email || 'unknown@example.com';
       const { rows: newUser } = await pool.query(
-        'INSERT INTO users (keycloak_id, name, email, role) VALUES ($1, $2, $3, $4) RETURNING user_id, name, email, role',
-        [keycloakId, userName, userEmail, 'buyer']
+        'INSERT INTO users (keycloak_id, name, email, role, is_verified, trust_level) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+        [keycloakId, userName, userEmail, 'buyer', false, TRUST_LEVELS.NEW]
       );
-      return res.json(newUser[0]);
+      const token = await createVerificationToken(keycloakId);
+      await sendVerificationEmail(newUser[0], token);
+      return res.status(201).json({ message: 'User created, please verify your email', user: newUser[0] });
     }
+
+    if (!rows[0].is_verified) {
+      return res.status(403).json({ error: 'Please verify your email' });
+    }
+
     res.json(rows[0]);
   } catch (error) {
     res.status(500).json({ error: 'Database error', details: error.message });
@@ -375,20 +355,8 @@ app.post('/api/search', async (req, res) => {
 
 // --- Order Routes ---
 
-// Add trust check to sensitive routes (e.g., orders)
-app.post('/api/orders', keycloak.protect('realm:buyer'), orderLimiter, requireTrustLevel(TRUST_LEVELS.VERIFIED), async (req, res) => {
-  const userId = req.kauth.grant.access_token.content.sub;
-  const { artwork_id, total_amount } = req.body;
-  const { rows } = await pool.query(
-    'INSERT INTO orders (buyer_id, artwork_id, total_amount) VALUES ($1, $2, $3) RETURNING *',
-    [userId, artwork_id, total_amount]
-  );
-  await updateUserTrustAfterOrder(userId);
-  res.status(201).json(rows[0]);
-});
-
 // Place Order (Buyer only)
-app.post('/api/orders', keycloak.protect('realm:buyer'), async (req, res) => {
+app.post('/api/orders', keycloak.protect('realm:buyer'), orderLimiter, requireTrustLevel(TRUST_LEVELS.VERIFIED), async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   const { artwork_id, total_amount } = req.body;
   try {
@@ -396,6 +364,7 @@ app.post('/api/orders', keycloak.protect('realm:buyer'), async (req, res) => {
       'INSERT INTO orders (buyer_id, artwork_id, total_amount) VALUES ($1, $2, $3) RETURNING *',
       [userId, artwork_id, total_amount]
     );
+    await updateUserTrustAfterOrder(userId);
     res.status(201).json(rows[0]);
   } catch (error) {
     res.status(500).json({ error: 'Database error', details: error.message });
@@ -559,22 +528,36 @@ const validateCategory = async (category_id) => {
 
 const validateImage = (file) => {
   if (!file) throw new Error('At least one image is required to create an artwork');
-  return path.normalize(file.path).replace(/^(\.\.(\/|\\|$))+/, '');
+  const normalizedPath = path.normalize(file.path).replace(/^(\.\.(\/|\\|$))+/, '');
+  if (/[^a-zA-Z0-9_\-\/\\\.]/.test(normalizedPath)) {
+    throw new Error('Invalid characters in file path');
+  }
+  return normalizedPath;
 };
 
 const insertArtwork = async (title, description, price, user_id, category_id) => {
-  const artworkResult = await pool.query(
-    'INSERT INTO artworks (title, description, price, artist_id, category_id) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-    [title, description, price, user_id, category_id]
-  );
-  return artworkResult.rows[0];
+  try {
+    const artworkResult = await pool.query(
+      'INSERT INTO artworks (title, description, price, user_id, category_id) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [title, description, price, user_id, category_id]
+    );
+    return artworkResult.rows[0];
+  } catch (error) {
+    console.error('Error inserting artwork:', error.message);
+    throw new Error('Database error while inserting artwork');
+  }
 };
 
 const insertArtworkImage = async (artwork_id, imagePath) => {
-  await pool.query(
-    'INSERT INTO artwork_images (artwork_id, image_path) VALUES ($1, $2)',
-    [artwork_id, imagePath]
-  );
+  try {
+    await pool.query(
+      'INSERT INTO artwork_images (artwork_id, image_path) VALUES ($1, $2)',
+      [artwork_id, imagePath]
+    );
+  } catch (error) {
+    console.error('Error inserting artwork image:', error.message);
+    throw new Error('Database error while inserting artwork image');
+  }
 };
 
 // Start the server
