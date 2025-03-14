@@ -1,3 +1,2 @@
 "uploads/" 
 ".env" 
-".env"   # Make sure .env is ignored
