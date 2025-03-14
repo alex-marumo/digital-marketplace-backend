@@ -345,9 +345,13 @@ CREATE TABLE public.users (
     user_id integer NOT NULL,
     name character varying(255) NOT NULL,
     email character varying(255) NOT NULL,
-    password text NOT NULL,
     role character varying(50) NOT NULL,
     created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    keycloak_id uuid,
+    is_verified boolean DEFAULT false,
+    verification_token character varying(255),
+    token_expires timestamp without time zone,
+    trust_level integer DEFAULT 1,
     CONSTRAINT users_role_check CHECK (((role)::text = ANY ((ARRAY['buyer'::character varying, 'artist'::character varying, 'admin'::character varying])::text[])))
 );
 
@@ -374,6 +378,44 @@ ALTER SEQUENCE public.users_user_id_seq OWNER TO postgres;
 --
 
 ALTER SEQUENCE public.users_user_id_seq OWNED BY public.users.user_id;
+
+
+--
+-- Name: verification_tokens; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.verification_tokens (
+    token_id integer NOT NULL,
+    user_id uuid NOT NULL,
+    token character varying(64) NOT NULL,
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    expires_at timestamp without time zone NOT NULL,
+    verified boolean DEFAULT false
+);
+
+
+ALTER TABLE public.verification_tokens OWNER TO postgres;
+
+--
+-- Name: verification_tokens_token_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.verification_tokens_token_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.verification_tokens_token_id_seq OWNER TO postgres;
+
+--
+-- Name: verification_tokens_token_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.verification_tokens_token_id_seq OWNED BY public.verification_tokens.token_id;
 
 
 --
@@ -437,6 +479,13 @@ ALTER TABLE ONLY public.reviews ALTER COLUMN review_id SET DEFAULT nextval('publ
 --
 
 ALTER TABLE ONLY public.users ALTER COLUMN user_id SET DEFAULT nextval('public.users_user_id_seq'::regclass);
+
+
+--
+-- Name: verification_tokens token_id; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.verification_tokens ALTER COLUMN token_id SET DEFAULT nextval('public.verification_tokens_token_id_seq'::regclass);
 
 
 --
@@ -520,6 +569,14 @@ ALTER TABLE ONLY public.reviews
 
 
 --
+-- Name: users unique_keycloak_id; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT unique_keycloak_id UNIQUE (keycloak_id);
+
+
+--
 -- Name: users users_email_key; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -533,6 +590,21 @@ ALTER TABLE ONLY public.users
 
 ALTER TABLE ONLY public.users
     ADD CONSTRAINT users_pkey PRIMARY KEY (user_id);
+
+
+--
+-- Name: verification_tokens verification_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.verification_tokens
+    ADD CONSTRAINT verification_tokens_pkey PRIMARY KEY (token_id);
+
+
+--
+-- Name: idx_verification_tokens_token; Type: INDEX; Schema: public; Owner: postgres
+--
+
+CREATE INDEX idx_verification_tokens_token ON public.verification_tokens USING btree (token);
 
 
 --
@@ -632,6 +704,14 @@ ALTER TABLE ONLY public.reviews
 
 
 --
+-- Name: verification_tokens verification_tokens_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.verification_tokens
+    ADD CONSTRAINT verification_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(keycloak_id) ON DELETE CASCADE;
+
+
+--
 -- Name: SCHEMA public; Type: ACL; Schema: -; Owner: pg_database_owner
 --
 
@@ -653,10 +733,24 @@ GRANT ALL ON TABLE public.artwork_images TO marketplace_user;
 
 
 --
+-- Name: SEQUENCE artwork_images_image_id_seq; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON SEQUENCE public.artwork_images_image_id_seq TO marketplace_user;
+
+
+--
 -- Name: TABLE artworks; Type: ACL; Schema: public; Owner: postgres
 --
 
 GRANT ALL ON TABLE public.artworks TO marketplace_user;
+
+
+--
+-- Name: SEQUENCE artworks_artwork_id_seq; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON SEQUENCE public.artworks_artwork_id_seq TO marketplace_user;
 
 
 --
@@ -713,6 +807,13 @@ GRANT ALL ON TABLE public.users TO marketplace_user;
 --
 
 GRANT ALL ON SEQUENCE public.users_user_id_seq TO marketplace_user;
+
+
+--
+-- Name: TABLE verification_tokens; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON TABLE public.verification_tokens TO marketplace_user;
 
 
 --
