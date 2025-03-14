@@ -11,12 +11,16 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const swaggerUI = require('swagger-ui-express');
 const fs = require('fs');
-const { pool } = require('./db'); // Single pool import
+const { pool } = require('./db');
 const { sendVerificationEmail } = require('./services/emailService');
 const { createVerificationToken, verifyToken } = require('./services/verificationService');
 const { verifyRecaptcha } = require('./services/recaptchaService');
-const { registrationLimiter } = require('./middleware/rateLimiter');
-const { requireTrustLevel, TRUST_LEVELS, updateUserTrustAfterOrder } = require('./middleware/trustLevel');
+
+const { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter } = require('./middleware/rateLimiter');
+console.log('Rate Limiters:', { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter })
+
+const { requireTrustLevel } = require('./middleware/trustLevel');
+const { TRUST_LEVELS, updateTrustLevel, updateUserTrustAfterOrder } = require('./services/trustService');
 
 const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json');
 const swaggerData = JSON.parse(fs.readFileSync(swaggerFile, 'utf8'));
@@ -24,17 +28,14 @@ const swaggerData = JSON.parse(fs.readFileSync(swaggerFile, 'utf8'));
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Middleware setup
+// Middleware setup (unchanged)
 app.use('/api-docs', swaggerUI.serve, swaggerUI.setup(swaggerData));
 app.use(express.json());
 app.use(cors());
 app.use(bodyParser.json());
 app.use(keycloak.middleware());
 
-// Keycloak middleware
-app.use(keycloak.middleware());
-
-// Multer for file uploads
+// Multer setup (unchanged)
 const storage = multer.diskStorage({
   destination: './uploads/',
   filename: (req, file, cb) => {
@@ -45,7 +46,6 @@ const upload = multer({ storage });
 
 // --- User Routes ---
 
-// Pre-registration endpoint (before Keycloak signup)
 app.post('/api/pre-register', registrationLimiter, async (req, res) => {
   const { recaptchaToken } = req.body;
   if (!recaptchaToken) return res.status(400).json({ error: 'reCAPTCHA required' });
@@ -57,8 +57,7 @@ app.post('/api/pre-register', registrationLimiter, async (req, res) => {
   res.json({ redirect: `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/registrations` });
 });
 
-// Verify email endpoint
-app.get('/api/verify-email', async (req, res) => {
+app.get('/api/verify-email', registrationLimiter, async (req, res) => {
   const { token } = req.query;
   if (!token) return res.status(400).json({ error: 'Missing token' });
 
@@ -69,58 +68,37 @@ app.get('/api/verify-email', async (req, res) => {
   res.json({ message: 'Email verified' });
 });
 
-// Modify /api/users/me to send verification email on first signup
-app.get('/api/users/me', keycloak.protect(), async (req, res) => {
-  const keycloakId = req.kauth.grant.access_token.content.sub;
-  const { rows } = await pool.query(
-    'SELECT user_id, name, email, role, is_verified, trust_level FROM users WHERE keycloak_id = $1',
-    [keycloakId]
-  );
-
-  if (rows.length === 0) {
-    const userName = req.kauth.grant.access_token.content.name || 'Unknown';
-    const userEmail = req.kauth.grant.access_token.content.email || 'unknown@example.com';
-    const { rows: newUser } = await pool.query(
-      'INSERT INTO users (keycloak_id, name, email, role, is_verified, trust_level) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [keycloakId, userName, userEmail, 'buyer', false, TRUST_LEVELS.NEW]
-    );
-    const token = await createVerificationToken(keycloakId);
-    await sendVerificationEmail(newUser[0], token);
-    return res.status(201).json({ message: 'User created, please verify your email', user: newUser[0] });
-  }
-
-  if (!rows[0].is_verified) {
-    return res.status(403).json({ error: 'Please verify your email' });
-  }
-
-  res.json(rows[0]);
-});
-
-// Fetch User Profile (Authenticated)
-app.get('/api/users/me', keycloak.protect(), async (req, res) => {
+app.get('/api/users/me', keycloak.protect(), authGetLimiter, async (req, res) => {
   try {
     const keycloakId = req.kauth.grant.access_token.content.sub;
     const { rows } = await pool.query(
-      'SELECT user_id, name, email, role FROM users WHERE keycloak_id = $1',
+      'SELECT user_id, name, email, role, is_verified, trust_level FROM users WHERE keycloak_id = $1',
       [keycloakId]
     );
+
     if (rows.length === 0) {
       const userName = req.kauth.grant.access_token.content.name || 'Unknown';
       const userEmail = req.kauth.grant.access_token.content.email || 'unknown@example.com';
       const { rows: newUser } = await pool.query(
-        'INSERT INTO users (keycloak_id, name, email, role) VALUES ($1, $2, $3, $4) RETURNING user_id, name, email, role',
-        [keycloakId, userName, userEmail, 'buyer']
+        'INSERT INTO users (keycloak_id, name, email, role, is_verified, trust_level) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+        [keycloakId, userName, userEmail, 'buyer', false, TRUST_LEVELS.NEW]
       );
-      return res.json(newUser[0]);
+      const token = await createVerificationToken(keycloakId);
+      await sendVerificationEmail(newUser[0], token);
+      return res.status(201).json({ message: 'User created, please verify your email', user: newUser[0] });
     }
+
+    if (!rows[0].is_verified) {
+      return res.status(403).json({ error: 'Please verify your email' });
+    }
+
     res.json(rows[0]);
   } catch (error) {
     res.status(500).json({ error: 'Database error', details: error.message });
   }
 });
 
-// Update User Profile (Authenticated)
-app.put('/api/users/me', keycloak.protect(), async (req, res) => {
+app.put('/api/users/me', keycloak.protect(), authPutLimiter, async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   const { name, email } = req.body;
   try {
@@ -136,8 +114,7 @@ app.put('/api/users/me', keycloak.protect(), async (req, res) => {
       query += ` email = $${values.length},`;
     }
     
-    // Remove trailing comma and complete the query
-    query = query.slice(0, -1) + ` WHERE user_id = $${values.length + 1} RETURNING user_id, name, email`;
+    query = query.slice(0, -1) + ` WHERE keycloak_id = $${values.length + 1} RETURNING user_id, name, email`;
     values.push(userId);
 
     const { rows } = await pool.query(query, values);
@@ -151,8 +128,7 @@ app.put('/api/users/me', keycloak.protect(), async (req, res) => {
 
 // --- Artist Routes ---
 
-// Create Artist Profile (Artist only)
-app.post('/api/artists', keycloak.protect('realm:artist'), async (req, res) => {
+app.post('/api/artists', keycloak.protect('realm:artist'), authPostLimiter, async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   const { bio, portfolio } = req.body;
   try {
@@ -166,8 +142,7 @@ app.post('/api/artists', keycloak.protect('realm:artist'), async (req, res) => {
   }
 });
 
-// Fetch All Artists (Public)
-app.get('/api/artists', async (req, res) => {
+app.get('/api/artists', publicDataLimiter, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM artists');
     res.json(rows);
@@ -176,8 +151,7 @@ app.get('/api/artists', async (req, res) => {
   }
 });
 
-// Fetch Specific Artist (Public)
-app.get('/api/artists/:id', async (req, res) => {
+app.get('/api/artists/:id', publicDataLimiter, async (req, res) => {
   try {
     const { rows } = await pool.query(
       'SELECT * FROM artists WHERE user_id = $1',
@@ -190,8 +164,7 @@ app.get('/api/artists/:id', async (req, res) => {
   }
 });
 
-// Update Artist Profile (Artist only)
-app.put('/api/artists/:id', keycloak.protect('realm:artist'), async (req, res) => {
+app.put('/api/artists/:id', keycloak.protect('realm:artist'), authPutLimiter, async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   if (userId !== req.params.id) return res.status(403).json({ error: 'Unauthorized' });
   const { bio, portfolio } = req.body;
@@ -209,8 +182,7 @@ app.put('/api/artists/:id', keycloak.protect('realm:artist'), async (req, res) =
 
 // --- Artwork Routes ---
 
-// Add Artwork (Artist only)
-app.post('/api/artworks', keycloak.protect('realm:artist'), upload.single('image'), async (req, res) => {
+app.post('/api/artworks', keycloak.protect('realm:artist'), artworkManagementLimiter, upload.single('image'), async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   const { title, description, price, category_id } = req.body;
   try {
@@ -225,8 +197,7 @@ app.post('/api/artworks', keycloak.protect('realm:artist'), upload.single('image
   }
 });
 
-// Upload Images for Artwork (Artist only)
-app.post('/api/artworks/:id/images', keycloak.protect('realm:artist'), upload.array('images', 5), async (req, res) => {
+app.post('/api/artworks/:id/images', keycloak.protect('realm:artist'), artworkManagementLimiter, upload.array('images', 5), async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   const artworkId = req.params.id;
   if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No images uploaded' });
@@ -241,8 +212,7 @@ app.post('/api/artworks/:id/images', keycloak.protect('realm:artist'), upload.ar
   }
 });
 
-// Fetch All Artworks (Public)
-app.get('/api/artworks', async (req, res) => {
+app.get('/api/artworks', publicDataLimiter, async (req, res) => {
   try {
     const { rows } = await pool.query(`
       SELECT a.*, COALESCE(json_agg(ai.image_path) FILTER (WHERE ai.image_path IS NOT NULL), '[]') AS images
@@ -256,8 +226,7 @@ app.get('/api/artworks', async (req, res) => {
   }
 });
 
-// Fetch Single Artwork (Public)
-app.get('/api/artworks/:id', async (req, res) => {
+app.get('/api/artworks/:id', publicDataLimiter, async (req, res) => {
   try {
     const { rows } = await pool.query(`
       SELECT a.*, COALESCE(json_agg(ai.image_path) FILTER (WHERE ai.image_path IS NOT NULL), '[]') AS images
@@ -273,8 +242,7 @@ app.get('/api/artworks/:id', async (req, res) => {
   }
 });
 
-// Edit Artwork (Artist only)
-app.put('/api/artworks/:id', keycloak.protect('realm:artist'), async (req, res) => {
+app.put('/api/artworks/:id', keycloak.protect('realm:artist'), artworkManagementLimiter, async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   const { title, description, price, category_id } = req.body;
   try {
@@ -290,8 +258,7 @@ app.put('/api/artworks/:id', keycloak.protect('realm:artist'), async (req, res) 
   }
 });
 
-// Delete Artwork (Artist or Admin only)
-app.delete('/api/artworks/:id', keycloak.protect(), async (req, res) => {
+app.delete('/api/artworks/:id', keycloak.protect(), authDeleteLimiter, async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   const userRoles = req.kauth.grant.access_token.content.realm_access.roles;
   try {
@@ -309,8 +276,7 @@ app.delete('/api/artworks/:id', keycloak.protect(), async (req, res) => {
 
 // --- Category Routes ---
 
-// Add Category (Admin only)
-app.post('/api/categories', keycloak.protect('realm:admin'), async (req, res) => {
+app.post('/api/categories', keycloak.protect('realm:admin'), authPostLimiter, async (req, res) => {
   const { name, description } = req.body;
   try {
     const { rows } = await pool.query(
@@ -323,8 +289,7 @@ app.post('/api/categories', keycloak.protect('realm:admin'), async (req, res) =>
   }
 });
 
-// Fetch All Categories (Public)
-app.get('/api/categories', async (req, res) => {
+app.get('/api/categories', publicDataLimiter, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM categories');
     res.json(rows);
@@ -333,8 +298,7 @@ app.get('/api/categories', async (req, res) => {
   }
 });
 
-// Update Category (Admin only)
-app.put('/api/categories/:id', keycloak.protect('realm:admin'), async (req, res) => {
+app.put('/api/categories/:id', keycloak.protect('realm:admin'), authPutLimiter, async (req, res) => {
   const { name, description } = req.body;
   try {
     const { rows } = await pool.query(
@@ -350,8 +314,7 @@ app.put('/api/categories/:id', keycloak.protect('realm:admin'), async (req, res)
 
 // --- Search Route ---
 
-// Search Artworks (Public)
-app.post('/api/search', async (req, res) => {
+app.post('/api/search', publicDataLimiter, async (req, res) => {
   const { query } = req.body;
   try {
     const { rows } = await pool.query(`
@@ -375,20 +338,7 @@ app.post('/api/search', async (req, res) => {
 
 // --- Order Routes ---
 
-// Add trust check to sensitive routes (e.g., orders)
-app.post('/api/orders', keycloak.protect('realm:buyer'), requireTrustLevel(TRUST_LEVELS.VERIFIED), async (req, res) => {
-  const userId = req.kauth.grant.access_token.content.sub;
-  const { artwork_id, total_amount } = req.body;
-  const { rows } = await pool.query(
-    'INSERT INTO orders (buyer_id, artwork_id, total_amount) VALUES ($1, $2, $3) RETURNING *',
-    [userId, artwork_id, total_amount]
-  );
-  await updateUserTrustAfterOrder(userId); // Update trust after order
-  res.status(201).json(rows[0]);
-});
-
-// Place Order (Buyer only)
-app.post('/api/orders', keycloak.protect('realm:buyer'), async (req, res) => {
+app.post('/api/orders', keycloak.protect('realm:buyer'), orderLimiter, requireTrustLevel(TRUST_LEVELS.VERIFIED), async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   const { artwork_id, total_amount } = req.body;
   try {
@@ -396,14 +346,14 @@ app.post('/api/orders', keycloak.protect('realm:buyer'), async (req, res) => {
       'INSERT INTO orders (buyer_id, artwork_id, total_amount) VALUES ($1, $2, $3) RETURNING *',
       [userId, artwork_id, total_amount]
     );
+    await updateUserTrustAfterOrder(userId); // From trustService.js
     res.status(201).json(rows[0]);
   } catch (error) {
     res.status(500).json({ error: 'Database error', details: error.message });
   }
 });
 
-// Fetch User Orders (Authenticated)
-app.get('/api/orders', keycloak.protect(), async (req, res) => {
+app.get('/api/orders', keycloak.protect(), authGetLimiter, async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   try {
     const { rows } = await pool.query('SELECT * FROM orders WHERE buyer_id = $1', [userId]);
@@ -413,8 +363,7 @@ app.get('/api/orders', keycloak.protect(), async (req, res) => {
   }
 });
 
-// Fetch Specific Order (Authenticated)
-app.get('/api/orders/:id', keycloak.protect(), async (req, res) => {
+app.get('/api/orders/:id', keycloak.protect(), authGetLimiter, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM orders WHERE order_id = $1', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ error: 'Order not found' });
@@ -424,8 +373,7 @@ app.get('/api/orders/:id', keycloak.protect(), async (req, res) => {
   }
 });
 
-// Update Order Status (Admin only)
-app.put('/api/orders/:id/status', keycloak.protect('realm:admin'), async (req, res) => {
+app.put('/api/orders/:id/status', keycloak.protect('realm:admin'), authPutLimiter, async (req, res) => {
   const { status } = req.body;
   try {
     const { rows } = await pool.query(
@@ -441,8 +389,7 @@ app.put('/api/orders/:id/status', keycloak.protect('realm:admin'), async (req, r
 
 // --- Order Items Routes ---
 
-// Add Items to Order (Authenticated)
-app.post('/api/order-items', keycloak.protect(), async (req, res) => {
+app.post('/api/order-items', keycloak.protect(), authPostLimiter, async (req, res) => {
   const { order_id, artwork_id, quantity, price } = req.body;
   try {
     const { rows } = await pool.query(
@@ -455,8 +402,7 @@ app.post('/api/order-items', keycloak.protect(), async (req, res) => {
   }
 });
 
-// Fetch Order Items (Authenticated)
-app.get('/api/order-items/:order_id', keycloak.protect(), async (req, res) => {
+app.get('/api/order-items/:order_id', keycloak.protect(), authGetLimiter, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM order_items WHERE order_id = $1', [req.params.order_id]);
     res.json(rows);
@@ -467,8 +413,7 @@ app.get('/api/order-items/:order_id', keycloak.protect(), async (req, res) => {
 
 // --- Payment Routes ---
 
-// Create Payment (Authenticated)
-app.post('/api/payments', keycloak.protect(), async (req, res) => {
+app.post('/api/payments', keycloak.protect(), authPostLimiter, async (req, res) => {
   const { order_id, amount } = req.body;
   try {
     const { rows } = await pool.query(
@@ -481,8 +426,7 @@ app.post('/api/payments', keycloak.protect(), async (req, res) => {
   }
 });
 
-// Fetch Payment Details (Authenticated)
-app.get('/api/payments/:order_id', keycloak.protect(), async (req, res) => {
+app.get('/api/payments/:order_id', keycloak.protect(), authGetLimiter, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM payments WHERE order_id = $1', [req.params.order_id]);
     res.json(rows);
@@ -491,8 +435,7 @@ app.get('/api/payments/:order_id', keycloak.protect(), async (req, res) => {
   }
 });
 
-// Update Payment Status (Admin only)
-app.put('/api/payments/:id/status', keycloak.protect('realm:admin'), async (req, res) => {
+app.put('/api/payments/:id/status', keycloak.protect('realm:admin'), authPutLimiter, async (req, res) => {
   const { status } = req.body;
   try {
     const { rows } = await pool.query(
@@ -508,8 +451,7 @@ app.put('/api/payments/:id/status', keycloak.protect('realm:admin'), async (req,
 
 // --- Review Routes ---
 
-// Leave Review (Buyer only)
-app.post('/api/reviews', keycloak.protect('realm:buyer'), async (req, res) => {
+app.post('/api/reviews', keycloak.protect('realm:buyer'), authPostLimiter, async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   const { artwork_id, rating, comment } = req.body;
   try {
@@ -523,8 +465,7 @@ app.post('/api/reviews', keycloak.protect('realm:buyer'), async (req, res) => {
   }
 });
 
-// Fetch Reviews for Artwork (Public)
-app.get('/api/reviews/:artwork_id', async (req, res) => {
+app.get('/api/reviews/:artwork_id', publicDataLimiter, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM reviews WHERE artwork_id = $1', [req.params.artwork_id]);
     res.json(rows);
@@ -535,8 +476,7 @@ app.get('/api/reviews/:artwork_id', async (req, res) => {
 
 // --- Message Routes ---
 
-// Send Message (Authenticated)
-app.post('/api/messages', keycloak.protect(), async (req, res) => {
+app.post('/api/messages', keycloak.protect(), messageLimiter, async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   const { receiver_id, content } = req.body;
   try {
@@ -559,22 +499,36 @@ const validateCategory = async (category_id) => {
 
 const validateImage = (file) => {
   if (!file) throw new Error('At least one image is required to create an artwork');
-  return path.normalize(file.path).replace(/^(\.\.(\/|\\|$))+/, '');
+  const normalizedPath = path.normalize(file.path).replace(/^(\.\.(\/|\\|$))+/, '');
+  if (/[^a-zA-Z0-9_\-\/\\\.]/.test(normalizedPath)) {
+    throw new Error('Invalid characters in file path');
+  }
+  return normalizedPath;
 };
 
 const insertArtwork = async (title, description, price, user_id, category_id) => {
-  const artworkResult = await pool.query(
-    'INSERT INTO artworks (title, description, price, artist_id, category_id) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-    [title, description, price, user_id, category_id]
-  );
-  return artworkResult.rows[0];
+  try {
+    const artworkResult = await pool.query(
+      'INSERT INTO artworks (title, description, price, artist_id, category_id) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [title, description, price, user_id, category_id]
+    );
+    return artworkResult.rows[0];
+  } catch (error) {
+    console.error('Error inserting artwork:', error.message);
+    throw new Error('Database error while inserting artwork');
+  }
 };
 
 const insertArtworkImage = async (artwork_id, imagePath) => {
-  await pool.query(
-    'INSERT INTO artwork_images (artwork_id, image_path) VALUES ($1, $2)',
-    [artwork_id, imagePath]
-  );
+  try {
+    await pool.query(
+      'INSERT INTO artwork_images (artwork_id, image_path) VALUES ($1, $2)',
+      [artwork_id, imagePath]
+    );
+  } catch (error) {
+    console.error('Error inserting artwork image:', error.message);
+    throw new Error('Database error while inserting artwork image');
+  }
 };
 
 // Start the server

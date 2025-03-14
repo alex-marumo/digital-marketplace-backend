@@ -1,11 +1,75 @@
 const rateLimit = require('express-rate-limit');
 
+const WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+
 const registrationLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
+  windowMs: WINDOW_MS,
   max: 5,
-  message: { error: 'Too many registration attempts from this IP' },
-  keyGenerator: (req) => req.ip,
-  skip: (req) => process.env.WHITELISTED_IPS?.split(',').includes(req.ip) || false
+  message: { error: 'Too many registration attempts, please try again later.' }
 });
 
-module.exports = { registrationLimiter };
+const orderLimiter = rateLimit({
+  windowMs: WINDOW_MS,
+  max: 10,
+  message: { error: 'Too many orders placed from this IP, please try again later.' }
+});
+
+const publicDataLimiter = rateLimit({
+  windowMs: WINDOW_MS,
+  max: 100,
+  message: { error: 'Too many requests, please try again later.' }
+});
+
+const messageLimiter = rateLimit({
+  windowMs: WINDOW_MS,
+  max: 20,
+  message: { error: 'Too many messages sent, please try again later.' },
+  keyGenerator: (req) => req.kauth.grant.access_token.content.sub
+});
+
+const artworkManagementLimiter = rateLimit({
+  windowMs: WINDOW_MS,
+  max: 10,
+  message: { error: 'Too many artwork operations, please try again later.' },
+  keyGenerator: (req) => req.kauth.grant.access_token.content.sub
+});
+
+const authGetLimiter = rateLimit({
+  windowMs: WINDOW_MS,
+  max: 50,
+  message: { error: 'Too many requests, please try again later.' },
+  keyGenerator: (req) => req.kauth.grant.access_token.content.sub
+});
+
+const authPostLimiter = rateLimit({
+  windowMs: WINDOW_MS,
+  max: 20,
+  message: { error: 'Too many actions, please try again later.' },
+  keyGenerator: (req) => req.kauth.grant.access_token.content.sub
+});
+
+const authPutLimiter = rateLimit({
+  windowMs: WINDOW_MS,
+  max: 15,
+  message: { error: 'Too many updates, please try again later.' },
+  keyGenerator: (req) => req.kauth.grant.access_token.content.sub
+});
+
+const authDeleteLimiter = rateLimit({
+  windowMs: WINDOW_MS,
+  max: 10,
+  message: { error: 'Too many deletions, please try again later.' },
+  keyGenerator: (req) => req.kauth.grant.access_token.content.sub
+});
+
+module.exports = {
+  registrationLimiter,
+  orderLimiter,
+  publicDataLimiter,
+  messageLimiter,
+  artworkManagementLimiter,
+  authGetLimiter,
+  authPostLimiter,
+  authPutLimiter,
+  authDeleteLimiter
+};
