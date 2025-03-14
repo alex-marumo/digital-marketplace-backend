@@ -34,4 +34,11 @@ const artworkManagementLimiter = rateLimit({
   keyGenerator: (req) => req.kauth.grant.access_token.content.sub
 });
 
-module.exports = { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter };
+const authGetLimiter = rateLimit({
+  windowMs: WINDOW_MS,
+  max: 50, // 50 requests per 15 minutes per user
+  message: { error: 'Too many profile requests, please try again later.' },
+  keyGenerator: (req) => req.kauth.grant.access_token.content.sub // Per Keycloak user ID
+});
+
+module.exports = { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter };

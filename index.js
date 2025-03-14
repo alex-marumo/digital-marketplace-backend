@@ -15,9 +15,9 @@ const { pool } = require('./db');
 const { sendVerificationEmail } = require('./services/emailService');
 const { createVerificationToken, verifyToken } = require('./services/verificationService');
 const { verifyRecaptcha } = require('./services/recaptchaService');
-const { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter } = require('./middleware/rateLimiter');
-console.log('Rate Limiters:', { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter });const { requireTrustLevel } = require('./middleware/trustLevel'); // Only middleware
-const { TRUST_LEVELS, updateTrustLevel, updateUserTrustAfterOrder } = require('./services/trustService'); // Trust logic
+const { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter } = require('./middleware/rateLimiter');
+const { requireTrustLevel } = require('./middleware/trustLevel');
+const { TRUST_LEVELS, updateTrustLevel, updateUserTrustAfterOrder } = require('./services/trustService');
 
 const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json');
 const swaggerData = JSON.parse(fs.readFileSync(swaggerFile, 'utf8'));
@@ -61,11 +61,11 @@ app.get('/api/verify-email', registrationLimiter, async (req, res) => {
   const result = await verifyToken(token);
   if (!result.valid) return res.status(400).json({ error: 'Invalid or expired token' });
 
-  await updateTrustLevel(result.userId, TRUST_LEVELS.VERIFIED); // From trustService.js
+  await updateTrustLevel(result.userId, TRUST_LEVELS.VERIFIED);
   res.json({ message: 'Email verified' });
 });
 
-app.get('/api/users/me', keycloak.protect(), async (req, res) => {
+app.get('/api/users/me', keycloak.protect(), authGetLimiter, async (req, res) => {
   try {
     const keycloakId = req.kauth.grant.access_token.content.sub;
     const { rows } = await pool.query(
