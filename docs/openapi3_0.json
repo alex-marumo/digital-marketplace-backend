@@ -2,8 +2,8 @@
   "openapi": "3.0.0",
   "info": {
     "title": "Digital Marketplace API",
-    "version": "1.1.0",
-    "description": "API for managing users, authentication, artists, artworks, orders, payments, reviews, and messages. Uses Keycloak for authentication and includes email verification, CAPTCHA protection, and role-based access control."
+    "version": "1.0.0",
+    "description": "API documentation for the Digital Marketplace backend. This backend handles user management (via Keycloak), artist and artwork management, orders, payments, reviews, messages, and search functionality. Rate limiting is applied on sensitive endpoints."
   },
   "servers": [
     {
@@ -17,7 +17,7 @@
         "type": "http",
         "scheme": "bearer",
         "bearerFormat": "JWT",
-        "description": "JWT token from Keycloak. Roles: `buyer`, `artist`, `admin`."
+        "description": "JWT token issued by Keycloak"
       }
     },
     "schemas": {
@@ -25,34 +25,247 @@
         "type": "object",
         "properties": {
           "user_id": { "type": "integer", "description": "Auto-incremented user ID" },
-          "keycloak_id": { "type": "string", "format": "uuid", "description": "Keycloak UUID" },
-          "name": { "type": "string", "description": "User's full name" },
-          "email": { "type": "string", "description": "User's email" },
-          "role": { "type": "string", "enum": ["buyer", "artist", "admin"], "description": "User's role" },
-          "trust_level": { "type": "string", "enum": ["unverified", "verified"], "description": "User trust level" }
+          "keycloak_id": { "type": "string", "format": "uuid", "description": "Keycloak user ID" },
+          "name": { "type": "string" },
+          "email": { "type": "string" },
+          "role": { "type": "string", "enum": ["buyer", "artist", "admin"] },
+          "is_verified": { "type": "boolean" },
+          "trust_level": { "type": "string" }
         },
         "required": ["user_id", "keycloak_id", "name", "email", "role"]
+      },
+      "Artist": {
+        "type": "object",
+        "properties": {
+          "user_id": { "type": "string", "format": "uuid", "description": "Keycloak user ID of the artist" },
+          "bio": { "type": "string" },
+          "portfolio": { "type": "string" }
+        },
+        "required": ["user_id", "bio", "portfolio"]
       },
       "Artwork": {
         "type": "object",
         "properties": {
-          "artwork_id": { "type": "integer" },
+          "artwork_id": { "type": "integer", "description": "Unique artwork ID" },
+          "artist_id": { "type": "string", "format": "uuid", "description": "Keycloak user ID of the artist" },
           "title": { "type": "string" },
           "description": { "type": "string" },
-          "price": { "type": "number" },
+          "price": { "type": "number", "format": "float" },
           "category_id": { "type": "integer" },
-          "artist_id": { "type": "integer" },
-          "images": { "type": "array", "items": { "type": "string" } }
+          "images": { 
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Array of image file paths" 
+          }
+        },
+        "required": ["artwork_id", "artist_id", "title", "price", "category_id"]
+      },
+      "Category": {
+        "type": "object",
+        "properties": {
+          "category_id": { "type": "integer", "description": "Unique category ID" },
+          "name": { "type": "string" },
+          "description": { "type": "string" }
+        },
+        "required": ["category_id", "name"]
+      },
+      "Order": {
+        "type": "object",
+        "properties": {
+          "order_id": { "type": "integer", "description": "Unique order ID" },
+          "buyer_id": { "type": "string", "format": "uuid", "description": "Keycloak user ID of the buyer" },
+          "artwork_id": { "type": "integer" },
+          "total_amount": { "type": "number", "format": "float" },
+          "status": { "type": "string", "enum": ["pending", "completed", "canceled"] }
+        },
+        "required": ["order_id", "buyer_id", "artwork_id", "total_amount", "status"]
+      },
+      "OrderItem": {
+        "type": "object",
+        "properties": {
+          "order_item_id": { "type": "integer" },
+          "order_id": { "type": "integer" },
+          "artwork_id": { "type": "integer" },
+          "quantity": { "type": "integer" },
+          "price": { "type": "number", "format": "float" }
+        },
+        "required": ["order_item_id", "order_id", "artwork_id", "quantity", "price"]
+      },
+      "Payment": {
+        "type": "object",
+        "properties": {
+          "payment_id": { "type": "integer" },
+          "order_id": { "type": "integer" },
+          "amount": { "type": "number", "format": "float" },
+          "status": { "type": "string", "enum": ["pending", "completed", "failed"] }
+        },
+        "required": ["payment_id", "order_id", "amount", "status"]
+      },
+      "Review": {
+        "type": "object",
+        "properties": {
+          "review_id": { "type": "integer" },
+          "artwork_id": { "type": "integer" },
+          "user_id": { "type": "string", "format": "uuid" },
+          "rating": { "type": "integer", "minimum": 1, "maximum": 5 },
+          "comment": { "type": "string" }
+        },
+        "required": ["review_id", "artwork_id", "user_id", "rating"]
+      },
+      "Message": {
+        "type": "object",
+        "properties": {
+          "message_id": { "type": "integer" },
+          "sender_id": { "type": "string", "format": "uuid" },
+          "receiver_id": { "type": "string", "format": "uuid" },
+          "content": { "type": "string" }
+        },
+        "required": ["message_id", "sender_id", "receiver_id", "content"]
+      },
+      "PreRegisterRequest": {
+        "type": "object",
+        "properties": {
+          "recaptchaToken": { "type": "string" }
+        },
+        "required": ["recaptchaToken"]
+      },
+      "VerifyEmailResponse": {
+        "type": "object",
+        "properties": {
+          "message": { "type": "string" }
         }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": { "type": "string" },
+          "details": { "type": "string" }
+        },
+        "required": ["error"]
       }
     }
   },
-  "security": [{ "BearerAuth": [] }],
+  "security": [
+    { "BearerAuth": [] }
+  ],
   "paths": {
     "/api/pre-register": {
       "post": {
-        "summary": "Pre-register a new user",
-        "description": "Pre-registration for a new user. Requires CAPTCHA validation to prevent spam.",
+        "summary": "Pre-register user",
+        "description": "Verifies reCAPTCHA before redirecting to Keycloak registration.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/PreRegisterRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Registration redirect URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "redirect": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "reCAPTCHA required or verification failed",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      }
+    },
+    "/api/verify-email": {
+      "get": {
+        "summary": "Verify email",
+        "description": "Verifies a user's email with a token.",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "Verification token"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Email verified",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/VerifyEmailResponse" } }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid token",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      }
+    },
+    "/api/users/me": {
+      "get": {
+        "summary": "Fetch current user's profile",
+        "description": "Returns the authenticated user's details; creates a user if not found.",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "User profile",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/User" } } }
+          },
+          "201": {
+            "description": "User created, verification email sent",
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "message": { "type": "string" }, "user": { "$ref": "#/components/schemas/User" } } } } }
+          },
+          "403": {
+            "description": "Email not verified",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      },
+      "put": {
+        "summary": "Update current user's profile",
+        "description": "Updates name and/or email of the authenticated user.",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string" }, "email": { "type": "string" } } } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Profile updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string" },
+                    "user": { "$ref": "#/components/schemas/User" }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "User not found",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/artists": {
+      "post": {
+        "summary": "Create artist profile",
+        "description": "Creates an artist profile (requires 'artist' role).",
+        "security": [{ "BearerAuth": ["realm:artist"] }],
         "requestBody": {
           "required": true,
           "content": {
@@ -60,70 +273,102 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "email": { "type": "string" },
-                  "captcha_token": { "type": "string" }
+                  "bio": { "type": "string" },
+                  "portfolio": { "type": "string" }
                 },
-                "required": ["email", "captcha_token"]
+                "required": ["bio", "portfolio"]
               }
             }
           }
         },
         "responses": {
-          "200": { "description": "Verification email sent." },
-          "400": { "description": "Invalid email or CAPTCHA failed." },
-          "409": { "description": "Email already in use." }
+          "201": {
+            "description": "Artist profile created",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Artist" } } }
+          },
+          "403": {
+            "description": "Requires artist role",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
         }
-      }
-    },
-    "/api/verify-email": {
+      },
       "get": {
-        "summary": "Verify email",
-        "description": "Verifies email through a unique token and updates the user's trust level.",
-        "parameters": [
-          { "name": "token", "in": "query", "required": true, "schema": { "type": "string" } }
-        ],
-        "responses": {
-          "200": { "description": "Email successfully verified." },
-          "400": { "description": "Invalid or expired token." }
-        }
-      }
-    },
-    "/api/users/me": {
-      "get": {
-        "summary": "Fetch current user's profile",
-        "description": "Returns the authenticated user's details. Creates a new user if none exists.",
-        "security": [{ "BearerAuth": [] }],
+        "summary": "List all artists",
+        "description": "Returns all artist profiles.",
         "responses": {
           "200": {
-            "description": "User profile",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/User" } } }
+            "description": "List of artists",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Artist" } } } }
           },
-          "401": { "description": "Unauthorized (no token)" }
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/artists/{id}": {
+      "get": {
+        "summary": "Get artist by ID",
+        "description": "Fetches a specific artist profile by Keycloak ID.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" },
+            "description": "Artist's Keycloak UUID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Artist details",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Artist" } } }
+          },
+          "404": {
+            "description": "Artist not found",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      },
+      "put": {
+        "summary": "Update artist profile",
+        "description": "Updates an artist profile (requires 'artist' role and matching ID).",
+        "security": [{ "BearerAuth": ["realm:artist"] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" },
+            "description": "Artist's Keycloak UUID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "properties": { "bio": { "type": "string" }, "portfolio": { "type": "string" } }, "required": ["bio", "portfolio"] } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Artist profile updated",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Artist" } } }
+          },
+          "403": {
+            "description": "Unauthorized",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "404": {
+            "description": "Artist not found",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
         }
       }
     },
     "/api/artworks": {
-      "get": {
-        "summary": "Get all artworks",
-        "tags": ["Artworks"],
-        "responses": {
-          "200": {
-            "description": "List of artworks.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": { "$ref": "#/components/schemas/Artwork" }
-                }
-              }
-            }
-          }
-        }
-      },
       "post": {
         "summary": "Add new artwork",
-        "tags": ["Artworks"],
-        "security": [{ "BearerAuth": [] }],
+        "description": "Creates an artwork with an image (requires 'artist' role).",
+        "security": [{ "BearerAuth": ["realm:artist"] }],
         "requestBody": {
           "required": true,
           "content": {
@@ -133,59 +378,624 @@
                 "properties": {
                   "title": { "type": "string" },
                   "description": { "type": "string" },
-                  "price": { "type": "number" },
+                  "price": { "type": "number", "format": "float" },
                   "category_id": { "type": "integer" },
-                  "image": { "type": "string", "format": "binary" }
-                }
+                  "image": { "type": "string", "format": "binary", "description": "Artwork image file" }
+                },
+                "required": ["title", "price", "category_id", "image"]
               }
             }
           }
         },
-        "responses": { "201": { "description": "Artwork added successfully." }, "403": { "description": "Unauthorized." } }
+        "responses": {
+          "201": {
+            "description": "Artwork created",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Artwork" } } }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "403": {
+            "description": "Requires 'artist' role",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      },
+      "get": {
+        "summary": "List all artworks",
+        "description": "Returns all artworks with their images.",
+        "responses": {
+          "200": {
+            "description": "Array of artworks",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Artwork" } } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/artworks/{id}": {
+      "get": {
+        "summary": "Get artwork by ID",
+        "description": "Fetches a specific artwork by its ID along with its images.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer" },
+            "description": "Artwork ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Artwork details",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Artwork" } } }
+          },
+          "404": {
+            "description": "Artwork not found",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      },
+      "put": {
+        "summary": "Update artwork",
+        "description": "Updates an artwork (requires 'artist' role and ownership).",
+        "security": [{ "BearerAuth": ["realm:artist"] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer" },
+            "description": "Artwork ID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "properties": {
+              "title": { "type": "string" },
+              "description": { "type": "string" },
+              "price": { "type": "number", "format": "float" },
+              "category_id": { "type": "integer" }
+            },
+            "required": ["title", "price", "category_id"]
+          } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Artwork updated",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Artwork" } } }
+          },
+          "403": {
+            "description": "Unauthorized",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "404": {
+            "description": "Artwork not found",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      },
+      "delete": {
+        "summary": "Delete artwork",
+        "description": "Deletes an artwork (requires artist ownership or admin role).",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer" },
+            "description": "Artwork ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Artwork deleted",
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "message": { "type": "string" } } } } }
+          },
+          "403": {
+            "description": "Unauthorized",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "404": {
+            "description": "Artwork not found",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/artworks/{id}/images": {
+      "post": {
+        "summary": "Upload artwork images",
+        "description": "Uploads up to 5 images for an artwork (requires 'artist' role).",
+        "security": [{ "BearerAuth": ["realm:artist"] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer" },
+            "description": "Artwork ID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "images": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "binary"
+                    },
+                    "maxItems": 5
+                  }
+                },
+                "required": ["images"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Images uploaded successfully",
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "message": { "type": "string" }, "images": { "type": "array", "items": { "type": "string" } } } } } }
+          },
+          "400": {
+            "description": "No images uploaded",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "403": {
+            "description": "Unauthorized",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "404": {
+            "description": "Artwork not found",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/categories": {
+      "post": {
+        "summary": "Add new category",
+        "description": "Creates a new category (requires 'admin' role).",
+        "security": [{ "BearerAuth": ["realm:admin"] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "description": { "type": "string" }
+            },
+            "required": ["name"]
+          } } }
+        },
+        "responses": {
+          "201": {
+            "description": "Category created",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Category" } } }
+          },
+          "403": {
+            "description": "Requires admin role",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      },
+      "get": {
+        "summary": "List all categories",
+        "description": "Returns all categories.",
+        "responses": {
+          "200": {
+            "description": "Array of categories",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Category" } } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/categories/{id}": {
+      "put": {
+        "summary": "Update category",
+        "description": "Updates an existing category (requires 'admin' role).",
+        "security": [{ "BearerAuth": ["realm:admin"] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer" },
+            "description": "Category ID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "description": { "type": "string" }
+            },
+            "required": ["name"]
+          } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Category updated",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Category" } } }
+          },
+          "403": {
+            "description": "Requires admin role",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "404": {
+            "description": "Category not found",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/search": {
+      "post": {
+        "summary": "Search artworks",
+        "description": "Searches artworks by title, artist name, or category.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "properties": {
+              "query": { "type": "string" }
+            },
+            "required": ["query"]
+          } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Array of matching artworks",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Artwork" } } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
       }
     },
     "/api/orders": {
       "post": {
         "summary": "Place an order",
-        "tags": ["Orders"],
+        "description": "Creates a new order (requires 'buyer' role, verified trust, and rate limited).",
+        "security": [{ "BearerAuth": ["realm:buyer"] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "properties": {
+              "artwork_id": { "type": "integer" },
+              "total_amount": { "type": "number", "format": "float" }
+            },
+            "required": ["artwork_id", "total_amount"]
+          } } }
+        },
+        "responses": {
+          "201": {
+            "description": "Order placed successfully",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Order" } } }
+          },
+          "403": {
+            "description": "Requires verified buyer role",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      },
+      "get": {
+        "summary": "Fetch user's orders",
+        "description": "Returns all orders placed by the authenticated buyer.",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "Array of orders",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Order" } } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/orders/{id}": {
+      "get": {
+        "summary": "Get order by ID",
+        "description": "Fetches a specific order by its ID.",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer" },
+            "description": "Order ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order details",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Order" } } }
+          },
+          "404": {
+            "description": "Order not found",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/orders/{id}/status": {
+      "put": {
+        "summary": "Update order status",
+        "description": "Updates the status of an order (requires 'admin' role).",
+        "security": [{ "BearerAuth": ["realm:admin"] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer" },
+            "description": "Order ID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "properties": {
+              "status": { "type": "string", "enum": ["pending", "completed", "canceled"] }
+            },
+            "required": ["status"]
+          } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Order updated",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Order" } } }
+          },
+          "403": {
+            "description": "Requires admin role",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "404": {
+            "description": "Order not found",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/order-items": {
+      "post": {
+        "summary": "Add item to order",
+        "description": "Adds an item to an order (requires authentication).",
         "security": [{ "BearerAuth": [] }],
         "requestBody": {
           "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "artwork_id": { "type": "integer" },
-                  "total_amount": { "type": "number" }
-                }
-              }
-            }
-          }
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "properties": {
+              "order_id": { "type": "integer" },
+              "artwork_id": { "type": "integer" },
+              "quantity": { "type": "integer" },
+              "price": { "type": "number", "format": "float" }
+            },
+            "required": ["order_id", "artwork_id", "quantity", "price"]
+          } } }
         },
-        "responses": { "201": { "description": "Order created successfully." }, "403": { "description": "Unauthorized." } }
+        "responses": {
+          "201": {
+            "description": "Order item added",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrderItem" } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/order-items/{order_id}": {
+      "get": {
+        "summary": "List order items",
+        "description": "Returns all items for a specific order (requires authentication).",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer" },
+            "description": "Order ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Array of order items",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/OrderItem" } } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
       }
     },
     "/api/payments": {
       "post": {
-        "summary": "Create a payment record",
-        "tags": ["Payments"],
+        "summary": "Create payment",
+        "description": "Records a payment for an order (requires authentication).",
         "security": [{ "BearerAuth": [] }],
         "requestBody": {
           "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "order_id": { "type": "integer" },
-                  "amount": { "type": "number" }
-                }
-              }
-            }
-          }
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "properties": {
+              "order_id": { "type": "integer" },
+              "amount": { "type": "number", "format": "float" }
+            },
+            "required": ["order_id", "amount"]
+          } } }
         },
-        "responses": { "201": { "description": "Payment recorded." }, "403": { "description": "Unauthorized." } }
+        "responses": {
+          "201": {
+            "description": "Payment created",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Payment" } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/payments/{order_id}": {
+      "get": {
+        "summary": "List payments for order",
+        "description": "Returns all payments for a specific order (requires authentication).",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer" },
+            "description": "Order ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Array of payments",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Payment" } } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/payments/{id}/status": {
+      "put": {
+        "summary": "Update payment status",
+        "description": "Updates the status of a payment (requires 'admin' role).",
+        "security": [{ "BearerAuth": ["realm:admin"] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer" },
+            "description": "Payment ID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "properties": {
+              "status": { "type": "string", "enum": ["pending", "completed", "failed"] }
+            },
+            "required": ["status"]
+          } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Payment updated",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Payment" } } }
+          },
+          "403": {
+            "description": "Requires admin role",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "404": {
+            "description": "Payment not found",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/reviews": {
+      "post": {
+        "summary": "Leave a review",
+        "description": "Creates a review for an artwork (requires 'buyer' role).",
+        "security": [{ "BearerAuth": ["realm:buyer"] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "properties": {
+              "artwork_id": { "type": "integer" },
+              "rating": { "type": "integer", "minimum": 1, "maximum": 5 },
+              "comment": { "type": "string" }
+            },
+            "required": ["artwork_id", "rating"]
+          } } }
+        },
+        "responses": {
+          "201": {
+            "description": "Review created",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Review" } } }
+          },
+          "403": {
+            "description": "Requires buyer role",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/reviews/{artwork_id}": {
+      "get": {
+        "summary": "List reviews for an artwork",
+        "description": "Returns all reviews for the specified artwork.",
+        "parameters": [
+          {
+            "name": "artwork_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer" },
+            "description": "Artwork ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Array of reviews",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Review" } } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/messages": {
+      "post": {
+        "summary": "Send a message",
+        "description": "Sends a message to another user (requires authentication).",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "properties": {
+              "receiver_id": { "type": "string", "format": "uuid" },
+              "content": { "type": "string" }
+            },
+            "required": ["receiver_id", "content"]
+          } } }
+        },
+        "responses": {
+          "201": {
+            "description": "Message sent",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Message" } } }
+          },
+          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
       }
     }
   }
