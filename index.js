@@ -18,6 +18,7 @@ const { verifyRecaptcha } = require('./services/recaptchaService');
 
 const { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter } = require('./middleware/rateLimiter');
 console.log('Rate Limiters:', { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter })
+console.log('SYSTEM_USER_ID:', process.env.SYSTEM_USER_ID)
 
 const { requireTrustLevel } = require('./middleware/trustLevel');
 const { TRUST_LEVELS, updateTrustLevel, updateUserTrustAfterOrder } = require('./services/trustService');
@@ -439,13 +440,51 @@ app.put('/api/payments/:id/status', keycloak.protect('realm:admin'), authPutLimi
   const { status } = req.body;
   try {
     const { rows } = await pool.query(
-      'UPDATE payments SET status = $1 WHERE payment_id = $2 RETURNING *',
+      'UPDATE payments SET status = $1 WHERE payment_id = $2 RETURNING order_id',
       [status, req.params.id]
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Payment not found' });
+
+    // Proceed only if status is 'completed' to notify artist
+    if (status === 'completed') {
+      const orderId = rows[0].order_id;
+      const { rows: orderRows } = await pool.query(
+        'SELECT artwork_id FROM orders WHERE order_id = $1',
+        [orderId]
+      );
+      const artworkId = orderRows[0].artwork_id;
+      const { rows: artworkRows } = await pool.query(
+        'SELECT artist_id FROM artworks WHERE artwork_id = $1',
+        [artworkId]
+      );
+      const artistId = artworkRows[0].artist_id;
+      const { rows: userRows } = await pool.query(
+        'SELECT email FROM users WHERE keycloak_id = $1',
+        [artistId]
+      );
+      const artistEmail = userRows[0].email;
+
+      // Email notification
+      const emailHtml = `
+        <h1>Artwork Sold!</h1>
+        <p>Congratulations, your artwork has been sold and payment has been completed. Please fulfill the order.</p>
+      `;
+      await sendEmail(artistEmail, 'Artwork Sale Completed', emailHtml);
+
+      // In-app message notification
+      const system_user_id = process.env.SYSTEM_USER_ID; // Must be set in .env
+      if (!system_user_id) throw new Error('SYSTEM_USER_ID not configured');
+      const messageContent = 'Your artwork has been sold and payment is complete. Please fulfill the order.';
+      await pool.query(
+        'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3)',
+        [system_user_id, artistId, messageContent]
+      );
+    }
+
     res.json(rows[0]);
   } catch (error) {
-    res.status(500).json({ error: 'Database error', details: error.message });
+    console.error('Payment status update error:', error.message);
+    res.status(500).json({ error: 'Database or notification error', details: error.message });
   }
 });
 
@@ -485,6 +524,10 @@ app.post('/api/messages', keycloak.protect(), messageLimiter, async (req, res) =
       [userId, receiver_id, content]
     );
     res.status(201).json(rows[0]);
+    await pool.query(
+      'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3)',
+      ['system-user-id', artistId, 'Payment completed for your artwork']
+    );
   } catch (error) {
     res.status(500).json({ error: 'Database error', details: error.message });
   }
