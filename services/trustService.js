@@ -9,6 +9,7 @@ const TRUST_LEVELS = {
 
 const updateTrustLevel = async (userId, newLevel) => {
   await pool.query('UPDATE users SET trust_level = $1 WHERE keycloak_id = $2', [newLevel, userId]);
+  console.log('Trust level updated for user:', userId);
 };
 
 const getTrustLevel = async (userId) => {
