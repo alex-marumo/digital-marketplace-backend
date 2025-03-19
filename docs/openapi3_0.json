@@ -832,31 +832,76 @@
         }
       }
     },
-    "/api/payments": {
-      "post": {
-        "summary": "Create payment",
-        "description": "Records a payment for an order (requires authentication).",
-        "security": [{ "BearerAuth": [] }],
-        "requestBody": {
-          "required": true,
-          "content": { "application/json": { "schema": {
+"/api/payments": {
+  "post": {
+    "summary": "Initiate a payment for an order",
+    "security": [
+      {
+        "bearerAuth": []
+      }
+    ],
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
             "type": "object",
             "properties": {
-              "order_id": { "type": "integer" },
-              "amount": { "type": "number", "format": "float" }
-            },
-            "required": ["order_id", "amount"]
-          } } }
-        },
-        "responses": {
-          "201": {
-            "description": "Payment created",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Payment" } } }
-          },
-          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+              "order_id": {
+                "type": "string",
+                "example": "order_123"
+              },
+              "amount": {
+                "type": "number",
+                "example": 50.00
+              },
+              "payment_method": {
+                "type": "string",
+                "example": "paypal"
+              },
+              "phone_number": {
+                "type": "string",
+                "example": "+26712345678"
+              }
+            }
+          }
         }
       }
     },
+    "responses": {
+      "201": {
+        "description": "Payment initiated",
+        "content": {
+          "application/json": {
+            "example": {
+              "paymentUrl": "https://paypal.com/approve/123"
+            }
+          }
+        }
+      },
+      "400": {
+        "description": "Invalid input",
+        "content": {
+          "application/json": {
+            "example": {
+              "error": "Amount must be a positive number"
+            }
+          }
+        }
+      },
+      "500": {
+        "description": "Server error",
+        "content": {
+          "application/json": {
+            "example": {
+              "error": "Failed to initiate payment"
+            }
+          }
+        }
+      }
+    }
+  }
+},
     "/api/payments/{order_id}": {
       "get": {
         "summary": "List payments for order",
@@ -921,7 +966,140 @@
         }
       }
     },
-    "/api/reviews": {
+    "/payment-callback": {
+      "post": {
+        "summary": "Handle PayPal payment callback",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "payment_status": {
+                    "type": "string",
+                    "example": "Completed"
+                 },
+                "txn_id": {
+                  "type": "string",
+                  "example": "txn_456"
+                },
+                "custom": {
+                  "type": "string",
+                  "example": "order_123"
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Callback processed",
+          "content": {
+            "application/json": {
+              "example": {
+                "status": "Processed"
+              }
+            } 
+          }
+        },
+        "404": {
+          "description": "Payment not found",
+          "content": {
+            "application/json": {
+              "example": {
+                "error": "Payment not found"
+              }
+            }
+          }
+        },
+        "500": {
+          "description": "Callback processing failed",
+          "content": {
+            "application/json": {
+              "example": {
+                "error": "Callback processing failed"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "/api/payments/confirm": {
+  "post": {
+    "summary": "Confirm a USSD payment",
+    "security": [
+      {
+        "bearerAuth": []
+      }
+    ],
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "order_id": {
+                "type": "string",
+                "example": "order_123"
+              },
+              "transaction_ref": {
+                "type": "string",
+                "example": "orange_money-order_123-1698765432"
+              }
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "200": {
+        "description": "Payment confirmed",
+        "content": {
+          "application/json": {
+            "example": {
+              "message": "Payment confirmed"
+            }
+          }
+        }
+      },
+      "400": {
+        "description": "Invalid input",
+        "content": {
+          "application/json": {
+            "example": {
+              "error": "Invalid transaction reference"
+            }
+          }
+        }
+      },
+      "404": {
+        "description": "Payment not found",
+        "content": {
+          "application/json": {
+            "example": {
+              "error": "Payment not found"
+            }
+          }
+        }
+      },
+      "500": {
+        "description": "Confirmation failed",
+        "content": {
+          "application/json": {
+            "example": {
+              "error": "Confirmation failed"
+            }
+          }
+        }
+      }
+    }
+  }
+},
+  "/api/reviews": {
       "post": {
         "summary": "Leave a review",
         "description": "Creates a review for an artwork (requires 'buyer' role).",
