@@ -7,20 +7,32 @@ const transporter = nodemailer.createTransport({
   auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASSWORD }
 });
 
-const sendVerificationEmail = async (user, token) => {
-  const verificationUrl = `${process.env.APP_URL}/api/verify-email?token=${token}`;
+const sendEmail = async (to, subject, html) => {
   const mailOptions = {
     from: `"Art Marketplace" <${process.env.EMAIL_FROM}>`,
-    to: user.email,
-    subject: 'Verify Your Email Address',
-    html: `
-      <h1>Welcome to Art Marketplace!</h1>
-      <p>Thanks for signing up, ${user.name}. Verify your email by clicking below:</p>
-      <a href="${verificationUrl}">Verify Email</a>
-      <p>Expires in 24 hours. Ignore if you didn’t sign up.</p>
-    `
+    to,
+    subject,
+    html
   };
-  return transporter.sendMail(mailOptions);
+  try {
+    const info = await transporter.sendMail(mailOptions);
+    console.log('Email sent successfully:', info.response);
+    return info;
+  } catch (error) {
+    console.error('Email sending failed:', error.message);
+    throw new Error('Email delivery failed');
+  }
 };
 
-module.exports = { sendVerificationEmail };
+const sendVerificationEmail = async (user, token) => {
+  const verificationUrl = `${process.env.APP_URL}/api/verify-email?token=${token}`;
+  const html = `
+    <h1>Welcome to Art Marketplace!</h1>
+    <p>Thanks for signing up, ${user.name}. Verify your email by clicking below:</p>
+    <a href="${verificationUrl}">Verify Email</a>
+    <p>Expires in 24 hours. Ignore if you didn’t sign up.</p>
+  `;
+  return sendEmail(user.email, 'Email Verification', html);
+};
+
+module.exports = { sendEmail, sendVerificationEmail };
