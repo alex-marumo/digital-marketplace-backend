@@ -48,14 +48,66 @@ const upload = multer({ storage });
 // --- User Routes ---
 
 app.post('/api/pre-register', registrationLimiter, async (req, res) => {
-  const { recaptchaToken } = req.body;
-  if (!recaptchaToken) return res.status(400).json({ error: 'reCAPTCHA required' });
+  const { recaptchaToken, email, name, password } = req.body;
+  if (!recaptchaToken || !email || !name || !password) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
 
   const recaptchaResult = await verifyRecaptcha(recaptchaToken);
   if (!recaptchaResult.success || recaptchaResult.score < 0.5) {
     return res.status(400).json({ error: 'reCAPTCHA verification failed' });
   }
-  res.json({ redirect: `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/registrations` });
+
+  try {
+    // Get Keycloak admin token
+    const adminToken = await axios.post(
+      `${process.env.KEYCLOAK_URL}/realms/master/protocol/openid-connect/token`,
+      new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: process.env.KEYCLOAK_ADMIN_CLIENT_ID,
+        client_secret: process.env.KEYCLOAK_ADMIN_CLIENT_SECRET,
+      }),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
+
+    // Create user in Keycloak
+    const userResponse = await axios.post(
+      `${process.env.KEYCLOAK_URL}/admin/realms/${process.env.KEYCLOAK_REALM}/users`,
+      {
+        username: email,
+        email,
+        firstName: name.split(' ')[0],
+        lastName: name.split(' ')[1] || '',
+        enabled: true,
+        credentials: [{ type: 'password', value: password, temporary: false }],
+        emailVerified: false,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${adminToken.data.access_token}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    // Get user ID from Location header
+    const keycloakId = userResponse.headers.location.split('/').pop();
+
+    // Insert into local database
+    const { rows } = await pool.query(
+      'INSERT INTO users (keycloak_id, name, email, role, is_verified, trust_level) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [keycloakId, name, email, 'buyer', false, TRUST_LEVELS.NEW]
+    );
+
+    // Send verification email
+    const token = await createVerificationToken(keycloakId);
+    await sendVerificationEmail(rows[0], token);
+
+    res.status(201).json({ message: 'User registered, please verify your email' });
+  } catch (error) {
+    console.error('Registration error:', error.message);
+    res.status(500).json({ error: 'Registration failed', details: error.message });
+  }
 });
 
 app.get('/api/verify-email', registrationLimiter, async (req, res) => {
@@ -64,6 +116,28 @@ app.get('/api/verify-email', registrationLimiter, async (req, res) => {
 
   const result = await verifyToken(token);
   if (!result.valid) return res.status(400).json({ error: 'Invalid or expired token' });
+
+  // Update Keycloak email verification
+  const adminToken = await axios.post(
+    `${process.env.KEYCLOAK_URL}/realms/master/protocol/openid-connect/token`,
+    new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: process.env.KEYCLOAK_ADMIN_CLIENT_ID,
+      client_secret: process.env.KEYCLOAK_ADMIN_CLIENT_SECRET,
+    }),
+    { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+  );
+
+  await axios.put(
+    `${process.env.KEYCLOAK_URL}/admin/realms/${process.env.KEYCLOAK_REALM}/users/${result.userId}`,
+    { emailVerified: true },
+    {
+      headers: {
+        Authorization: `Bearer ${adminToken.data.access_token}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
 
   await updateTrustLevel(result.userId, TRUST_LEVELS.VERIFIED);
   res.json({ message: 'Email verified' });
