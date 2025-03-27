@@ -1,5 +1,6 @@
 const nodemailer = require('nodemailer');
 
+// Transporter unchanged
 const transporter = nodemailer.createTransport({
   host: process.env.EMAIL_HOST,
   port: process.env.EMAIL_PORT,
@@ -24,15 +25,15 @@ const sendEmail = async (to, subject, html) => {
   }
 };
 
-const sendVerificationEmail = async (user, token) => {
-  const verificationUrl = `${process.env.APP_URL}/api/verify-email?token=${token}`;
+// Updated to send a code
+const sendVerificationEmail = async (user, code) => {
   const html = `
     <h1>Welcome to Art Marketplace!</h1>
-    <p>Thanks for signing up, ${user.name}. Verify your email by clicking below:</p>
-    <a href="${verificationUrl}">Verify Email</a>
-    <p>Expires in 24 hours. Ignore if you didn’t sign up.</p>
+    <p>Thanks for signing up, ${user.name}. Enter this code in the app to verify your email:</p>
+    <h2>${code}</h2>
+    <p>Expires in 10 minutes. Ignore if you didn’t sign up.</p>
   `;
-  return sendEmail(user.email, 'Email Verification', html);
+  return sendEmail(user.email, 'Email Verification Code', html);
 };
 
 module.exports = { sendEmail, sendVerificationEmail };
