@@ -59,7 +59,6 @@ app.post('/api/pre-register', registrationLimiter, async (req, res) => {
   }
 
   try {
-    // Get Keycloak admin token
     const adminToken = await axios.post(
       `${process.env.KEYCLOAK_URL}/realms/master/protocol/openid-connect/token`,
       new URLSearchParams({
@@ -70,7 +69,6 @@ app.post('/api/pre-register', registrationLimiter, async (req, res) => {
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
     );
 
-    // Create user in Keycloak
     const userResponse = await axios.post(
       `${process.env.KEYCLOAK_URL}/admin/realms/${process.env.KEYCLOAK_REALM}/users`,
       {
@@ -90,57 +88,61 @@ app.post('/api/pre-register', registrationLimiter, async (req, res) => {
       }
     );
 
-    // Get user ID from Location header
     const keycloakId = userResponse.headers.location.split('/').pop();
-
-    // Insert into local database
     const { rows } = await pool.query(
       'INSERT INTO users (keycloak_id, name, email, role, is_verified, trust_level) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
       [keycloakId, name, email, 'buyer', false, TRUST_LEVELS.NEW]
     );
 
-    // Send verification email
-    const token = await createVerificationToken(keycloakId);
-    await sendVerificationEmail(rows[0], token);
+    const code = await createVerificationCode(keycloakId); // Changed from token
+    await sendVerificationEmail(rows[0], code);
 
-    res.status(201).json({ message: 'User registered, please verify your email' });
+    res.status(201).json({ message: 'User registered, enter the code from your email in the app' });
   } catch (error) {
     console.error('Registration error:', error.message);
     res.status(500).json({ error: 'Registration failed', details: error.message });
   }
 });
 
-app.get('/api/verify-email', registrationLimiter, async (req, res) => {
-  const { token } = req.query;
-  if (!token) return res.status(400).json({ error: 'Missing token' });
+app.post('/api/verify-email-code', registrationLimiter, async (req, res) => {
+  const { code } = req.body;
+  if (!code) return res.status(400).json({ error: 'Missing code' });
 
-  const result = await verifyToken(token);
-  if (!result.valid) return res.status(400).json({ error: 'Invalid or expired token' });
+  try {
+    // Get user ID from Keycloak token (assuming user is logged in after registration)
+    const keycloakId = req.kauth?.grant?.access_token?.content?.sub;
+    if (!keycloakId) return res.status(401).json({ error: 'User not authenticated' });
 
-  // Update Keycloak email verification
-  const adminToken = await axios.post(
-    `${process.env.KEYCLOAK_URL}/realms/master/protocol/openid-connect/token`,
-    new URLSearchParams({
-      grant_type: 'client_credentials',
-      client_id: process.env.KEYCLOAK_ADMIN_CLIENT_ID,
-      client_secret: process.env.KEYCLOAK_ADMIN_CLIENT_SECRET,
-    }),
-    { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-  );
+    const result = await verifyCode(keycloakId, code);
+    if (!result.valid) return res.status(400).json({ error: 'Invalid or expired code' });
 
-  await axios.put(
-    `${process.env.KEYCLOAK_URL}/admin/realms/${process.env.KEYCLOAK_REALM}/users/${result.userId}`,
-    { emailVerified: true },
-    {
-      headers: {
-        Authorization: `Bearer ${adminToken.data.access_token}`,
-        'Content-Type': 'application/json',
-      },
-    }
-  );
+    const adminToken = await axios.post(
+      `${process.env.KEYCLOAK_URL}/realms/master/protocol/openid-connect/token`,
+      new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: process.env.KEYCLOAK_ADMIN_CLIENT_ID,
+        client_secret: process.env.KEYCLOAK_ADMIN_CLIENT_SECRET,
+      }),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
 
-  await updateTrustLevel(result.userId, TRUST_LEVELS.VERIFIED);
-  res.json({ message: 'Email verified' });
+    await axios.put(
+      `${process.env.KEYCLOAK_URL}/admin/realms/${process.env.KEYCLOAK_REALM}/users/${result.userId}`,
+      { emailVerified: true },
+      {
+        headers: {
+          Authorization: `Bearer ${adminToken.data.access_token}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    await updateTrustLevel(result.userId, TRUST_LEVELS.VERIFIED);
+    res.json({ message: 'Email verified' });
+  } catch (error) {
+    console.error('Code verification error:', error.message);
+    res.status(500).json({ error: 'Verification failed', details: error.message });
+  }
 });
 
 app.get('/api/users/me', keycloak.protect(), authGetLimiter, async (req, res) => {

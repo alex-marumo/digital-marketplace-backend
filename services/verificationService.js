@@ -1,26 +1,31 @@
+const crypto = require('crypto');
 const { pool } = require('../db');
-const cryptoRandomString = require('crypto-random-string');
 
-const createVerificationToken = async (userId) => {
-  const token = cryptoRandomString({ length: 64, type: 'url-safe' });
-  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
-  const { rows } = await pool.query(
-    'INSERT INTO verification_tokens (user_id, token, expires_at) VALUES ($1, $2, $3) RETURNING token',
-    [userId, token, expiresAt]
+// Generate a 6-digit code and store it
+const createVerificationCode = async (userId) => {
+  const code = Math.floor(100000 + Math.random() * 900000).toString(); // 6-digit code
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes expiration
+  await pool.query(
+    'INSERT INTO verification_codes (user_id, code, expires_at) VALUES ($1, $2, $3)',
+    [userId, code, expiresAt]
   );
-  return rows[0].token;
+  return code;
 };
 
-const verifyToken = async (token) => {
+// Verify the code
+const verifyCode = async (userId, code) => {
   const { rows } = await pool.query(
-    'SELECT user_id, expires_at FROM verification_tokens WHERE token = $1 AND verified = FALSE',
-    [token]
+    'SELECT * FROM verification_codes WHERE user_id = $1 AND code = $2',
+    [userId, code]
   );
   if (rows.length === 0) return { valid: false };
-  const { user_id, expires_at } = rows[0];
-  if (new Date() > expires_at) return { valid: false };
-  await pool.query('UPDATE verification_tokens SET verified = TRUE WHERE token = $1', [token]);
-  return { valid: true, userId: user_id };
+  const record = rows[0];
+  if (new Date() > new Date(record.expires_at)) {
+    await pool.query('DELETE FROM verification_codes WHERE user_id = $1 AND code = $2', [userId, code]);
+    return { valid: false };
+  }
+  await pool.query('DELETE FROM verification_codes WHERE user_id = $1 AND code = $2', [userId, code]);
+  return { valid: true, userId };
 };
 
-module.exports = { createVerificationToken, verifyToken };
+module.exports = { createVerificationCode, verifyCode };
