@@ -19,6 +19,7 @@ const { verifyRecaptcha } = require('./services/recaptchaService');
 const { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter } = require('./middleware/rateLimiter');
 console.log('Rate Limiters:', { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter })
 console.log('SYSTEM_USER_ID:', process.env.SYSTEM_USER_ID)
+console.log('SYSTEM_USER_ID:', process.env.SYSTEM_USER_ID)
 
 const { requireTrustLevel } = require('./middleware/trustLevel');
 const { TRUST_LEVELS, updateTrustLevel, updateUserTrustAfterOrder } = require('./services/trustService');
@@ -545,6 +546,48 @@ app.post('/api/payments', keycloak.protect(), authPostLimiter, async (req, res) 
       return res.status(400).json({ error: 'Phone number is required for mobile money payments' });
     }
 
+    if (payment_method === 'paypal') {
+      try {
+        const response = await axios.post(
+          'https://api.sandbox.paypal.com/v1/payments/payment',
+          {
+            intent: 'sale',
+            payer: { payment_method: 'paypal' },
+            transactions: [{ amount: { total: amount.toFixed(2), currency: 'BWP' }, description: 'Artwork Purchase' }],
+            redirect_urls: { return_url: `${process.env.APP_URL}/payment-callback`, cancel_url: `${process.env.APP_URL}/payment-cancel` },
+          },
+          {
+            headers: {
+              Authorization: `Basic ${Buffer.from(`${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_SECRET}`).toString('base64')}`,
+              'Content-Type': 'application/json',
+            },
+          }
+        );
+        paymentUrl = response.data.links.find(link => link.rel === 'approval_url').href;
+        paymentRef = response.data.id;
+      } catch (error) {
+        console.error('PayPal API error:', error.message);
+        return res.status(503).json({ error: 'PayPal service unavailable' });
+      }
+    } else if (payment_method === 'orange_money' || payment_method === 'myzaka') {
+      const ussdCode = payment_method === 'orange_money' ? '*145#' : '*167#';
+      paymentRef = `${payment_method}-${order_id}-${Date.now()}`;
+      paymentUrl = `Please complete payment via USSD: ${ussdCode}`;
+    } else {
+      return res.status(400).json({ error: 'Unsupported payment method' });
+    }
+
+    // Input validation
+    if (!order_id || !amount || !payment_method) {
+      return res.status(400).json({ error: 'Missing required fields: order_id, amount, or payment_method' });
+    }
+    if (typeof amount !== 'number' || amount <= 0) {
+      return res.status(400).json({ error: 'Amount must be a positive number' });
+    }
+    if ((payment_method === 'orange_money' || payment_method === 'myzaka') && !phone_number) {
+      return res.status(400).json({ error: 'Phone number is required for mobile money payments' });
+    }
+
     let paymentUrl, paymentRef;
 
     if (payment_method === 'paypal') {
@@ -584,7 +627,11 @@ app.post('/api/payments', keycloak.protect(), authPostLimiter, async (req, res) 
     );
     console.log('Payment initiated:', { payment_id: rows[0].payment_id, paymentRef });
     res.status(201).json({ paymentUrl });
+    console.log('Payment initiated:', { payment_id: rows[0].payment_id, paymentRef });
+    res.status(201).json({ paymentUrl });
   } catch (error) {
+    console.error('Payment initiation error:', error.message);
+    res.status(500).json({ error: 'Failed to initiate payment', details: error.message });
     console.error('Payment initiation error:', error.message);
     res.status(500).json({ error: 'Failed to initiate payment', details: error.message });
   }
@@ -603,6 +650,7 @@ app.put('/api/payments/:id/status', keycloak.protect('realm:admin'), authPutLimi
   const { status } = req.body;
   try {
     const { rows } = await pool.query(
+      'UPDATE payments SET status = $1 WHERE payment_id = $2 RETURNING order_id',
       'UPDATE payments SET status = $1 WHERE payment_id = $2 RETURNING order_id',
       [status, req.params.id]
     );
@@ -643,8 +691,119 @@ app.put('/api/payments/:id/status', keycloak.protect('realm:admin'), authPutLimi
         [system_user_id, artistId, messageContent]
       );
     }
+
+    // Proceed only if status is 'completed' to notify artist
+    if (status === 'completed') {
+      const orderId = rows[0].order_id;
+      const { rows: orderRows } = await pool.query(
+        'SELECT artwork_id FROM orders WHERE order_id = $1',
+        [orderId]
+      );
+      const artworkId = orderRows[0].artwork_id;
+      const { rows: artworkRows } = await pool.query(
+        'SELECT artist_id FROM artworks WHERE artwork_id = $1',
+        [artworkId]
+      );
+      const artistId = artworkRows[0].artist_id;
+      const { rows: userRows } = await pool.query(
+        'SELECT email FROM users WHERE keycloak_id = $1',
+        [artistId]
+      );
+      const artistEmail = userRows[0].email;
+
+      // Email notification
+      const emailHtml = `
+        <h1>Artwork Sold!</h1>
+        <p>Congratulations, your artwork has been sold and payment has been completed. Please fulfill the order.</p>
+      `;
+      await sendEmail(artistEmail, 'Artwork Sale Completed', emailHtml);
+
+      // In-app message notification
+      const system_user_id = process.env.SYSTEM_USER_ID; // Must be set in .env
+      if (!system_user_id) throw new Error('SYSTEM_USER_ID not configured');
+      const messageContent = 'Your artwork has been sold and payment is complete. Please fulfill the order.';
+      await pool.query(
+        'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3)',
+        [system_user_id, artistId, messageContent]
+      );
+    }
     res.json(rows[0]);
   } catch (error) {
+    console.error('Payment status update error:', error.message);
+    res.status(500).json({ error: 'Database or notification error', details: error.message });
+  }
+});
+
+// Confirm payment and notify artist
+app.post('/api/payments/confirm', keycloak.protect(), async (req, res) => {
+  const { order_id, transaction_ref } = req.body;
+  const client = await pool.connect();
+  try {
+    if (!order_id || !transaction_ref) {
+      return res.status(400).json({ error: 'Missing order_id or transaction_ref' });
+    }
+    if (!transaction_ref.startsWith('orange_money-') && !transaction_ref.startsWith('myzaka-')) {
+      return res.status(400).json({ error: 'Invalid transaction reference' });
+    }
+
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      'UPDATE payments SET status = $1, payment_ref = $2 WHERE order_id = $3 RETURNING order_id',
+      ['completed', transaction_ref, order_id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Payment not found' });
+
+    const orderId = rows[0].order_id;
+    const { rows: orderRows } = await client.query(
+      'SELECT artwork_id, buyer_id FROM orders WHERE order_id = $1',
+      [orderId]
+    );
+    const artworkId = orderRows[0].artwork_id;
+    const buyerId = orderRows[0].buyer_id;
+
+    const { rows: artworkRows } = await client.query(
+      'SELECT artist_id, title FROM artworks WHERE artwork_id = $1',
+      [artworkId]
+    );
+    const artistId = artworkRows[0].artist_id;
+    const artworkTitle = artworkRows[0].title;
+
+    const { rows: artistRows } = await client.query(
+      'SELECT email FROM users WHERE keycloak_id = $1',
+      [artistId]
+    );
+    const artistEmail = artistRows[0].email;
+
+    const { rows: buyerRows } = await client.query(
+      'SELECT email FROM users WHERE keycloak_id = $1',
+      [buyerId]
+    );
+    const buyerEmail = buyerRows[0].email;
+
+    // Notify artist
+    const artistEmailHtml = `<h1>Artwork Sold!</h1><p>Your artwork "${artworkTitle}" has been sold and payment is complete. Please fulfill the order.</p>`;
+    await sendEmail(artistEmail, 'Artwork Sale Completed', artistEmailHtml);
+
+    const system_user_id = process.env.SYSTEM_USER_ID;
+    if (!system_user_id) throw new Error('SYSTEM_USER_ID not configured');
+    const artistMessage = `Your artwork "${artworkTitle}" is sold and paid. Fulfill the order.`;
+    await client.query(
+      'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3)',
+      [system_user_id, artistId, artistMessage]
+    );
+
+    // Notify buyer
+    const buyerEmailHtml = `<h1>Payment Confirmed</h1><p>Your payment for "${artworkTitle}" is complete. Thank you for your purchase!</p>`;
+    await sendEmail(buyerEmail, 'Payment Confirmation', buyerEmailHtml);
+
+    await client.query('COMMIT');
+    res.status(200).json({ message: 'Payment confirmed' });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('USSD confirmation error:', error.message);
+    res.status(500).json({ error: 'Confirmation failed', details: error.message });
+  } finally {
+    client.release();
     console.error('Payment status update error:', error.message);
     res.status(500).json({ error: 'Database or notification error', details: error.message });
   }
@@ -763,8 +922,80 @@ app.post('/api/messages', keycloak.protect(), messageLimiter, async (req, res) =
       'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3)',
       ['system-user-id', artistId, 'Payment completed for your artwork']
     );
+    await pool.query(
+      'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3)',
+      ['system-user-id', artistId, 'Payment completed for your artwork']
+    );
   } catch (error) {
     res.status(500).json({ error: 'Database error', details: error.message });
+  }
+});
+
+//PayPal Callback
+
+app.post('/payment-callback', express.json(), async (req, res) => {
+  const { payment_status, txn_id, custom } = req.body;
+  const client = await pool.connect();
+  try {
+    // Basic origin check (expand with PayPal’s official IP list)
+    const allowedIps = ['66.211.170.66', '173.0.81.1']; // Example PayPal IPs
+    if (!allowedIps.includes(req.ip)) {
+      console.warn('Unauthorized callback attempt from IP:', req.ip);
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    if (payment_status === 'Completed') {
+      const orderId = custom;
+      await client.query('BEGIN');
+      const { rows } = await client.query(
+        'UPDATE payments SET status = $1, payment_ref = $2 WHERE order_id = $3 RETURNING order_id',
+        ['completed', txn_id, orderId]
+      );
+      if (rows.length === 0) {
+        console.error('Payment not found for order_id:', orderId);
+        return res.status(404).json({ error: 'Payment not found' });
+      }
+
+      const { rows: orderRows } = await client.query(
+        'SELECT artwork_id FROM orders WHERE order_id = $1',
+        [orderId]
+      );
+      const artworkId = orderRows[0].artwork_id;
+      const { rows: artworkRows } = await client.query(
+        'SELECT artist_id, title FROM artworks WHERE artwork_id = $1',
+        [artworkId]
+      );
+      const artistId = artworkRows[0].artist_id;
+      const artworkTitle = artworkRows[0].title;
+
+      const { rows: userRows } = await client.query(
+        'SELECT email FROM users WHERE keycloak_id = $1',
+        [artistId]
+      );
+      const artistEmail = userRows[0].email;
+
+      const emailHtml = `<h1>Artwork Sold!</h1><p>Your artwork "${artworkTitle}" has been sold and payment is complete. Please fulfill the order.</p>`;
+      await sendEmail(artistEmail, 'Artwork Sale Completed', emailHtml);
+
+      const system_user_id = process.env.SYSTEM_USER_ID;
+      if (!system_user_id) throw new Error('SYSTEM_USER_ID not configured');
+      const messageContent = `Your artwork "${artworkTitle}" is sold and paid. Fulfill the order.`;
+      await client.query(
+        'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3)',
+        [system_user_id, artistId, messageContent]
+      );
+      await client.query('COMMIT');
+
+      console.log('Payment completed and artist notified for order:', orderId);
+      await updateUserTrustAfterOrder(buyerId);
+    }
+    res.status(200).json({ status: 'Processed' });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('PayPal callback error:', error.message);
+    res.status(500).json({ error: 'Callback processing failed', details: error.message });
+  } finally {
+    client.release();
   }
 });
 

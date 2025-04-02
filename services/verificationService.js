@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const { pool } = require('../db');
 
 // Generate a 6-digit verification code and store it
@@ -49,4 +50,5 @@ const verifyCode = async (userId, code) => {
   }
 };
 
+module.exports = { createVerificationCode, verifyCode };
 module.exports = { createVerificationCode, verifyCode };
