@@ -1,181 +1,206 @@
+---
+
 # **Digital Marketplace Backend**
 
 ## **📌 Overview**
-This is the backend for the **Digital Marketplace**, a platform where artists can showcase and sell their artwork while buyers can purchase and review them. The backend is built using **Node.js, Express.js, and PostgreSQL**.
+Welcome to the **Digital Marketplace Backend**—the gritty engine powering a platform where artists sling their masterpieces and buyers scoop ‘em up. Built with **Node.js, Express.js, and PostgreSQL**, this bad boy’s locked and loaded with Keycloak for auth, Nodemailer for email blasts, and a battle-hardened API that’s ready to scale.
 
 ## **🚀 Features**
 
 - **User & Account Management**
-  - Automated user creation via Keycloak on first login.
-  - Email verification and CAPTCHA to prevent duplicate accounts.
-  - Role-based access: Buyers, Artists, and Admins.
+  - Auto user creation via Keycloak on signup—email/password baked in.
+  - Email verification with 6-digit codes (expires in 1 hour, because Gmail’s a slacker).
+  - reCAPTCHA to keep the bots at bay.
+  - Roles: **Buyers** shop, **Artists** create, **Admins** rule.
 
 - **Artist & Artwork Management**
-  - Artists can create and update their profiles.
-  - Artists can add, update, and delete artworks, with multiple image uploads.
+  - Artists craft profiles and drop artworks with multi-image uploads.
+  - Edit or trash your creations—full control, no mercy.
 
 - **Order & Checkout System**
-  - Buyers can place orders and track their orders.
-  - Detailed order items and payment records are maintained.
+  - Buyers order up, track their loot, and dig into order details.
+  - Payments tie into orders with admin oversight.
 
 - **Payments & Transactions**
-  - Secure payment processing with status updates.
-  - Admin-only controls for managing payment statuses.
+  - Secure payment hooks (PayPal, Orange Money, MyZaka) with status updates.
+  - Admins tweak payment states; artists get pinged on sales.
 
 - **Reviews & Messaging**
-  - Buyers can leave reviews on artworks.
-  - Users can send messages to each other.
+  - Buyers rate artworks—stars and sass.
+  - Direct messages between users—keep it civil or not, your call.
 
 - **Search & Filtering**
-  - Search artworks by title, artist name, or category.
-  - Filter artworks and orders by various criteria.
+  - Hunt artworks by title, artist, or category—fast and dirty.
 
 - **Security & Anti-Abuse**
-  - Rate limiting to mitigate abuse.
-  - Email verification and CAPTCHA to reduce fraudulent registrations.
-  - Detailed audit logging for critical transactions.
+  - Rate limiting to choke out spammers.
+  - Email verification + reCAPTCHA = no fake accounts.
+  - Audit logs for when shit hits the fan.
 
 ## **🛠 Tech Stack**
-- **Backend:** Node.js, Express.js
-- **Database:** PostgreSQL
-- **Authentication:** Keycloak (with JWT tokens)
-- **Session Store:** PostgreSQL-backed sessions (connect-pg-simple)
-- **File Storage:** Local storage (for images, with paths stored in the database)
-- **Additional Tools:** Nodemailer for email verification, Google reCAPTCHA for CAPTCHA verification
+- **Backend**: Node.js, Express.js
+- **Database**: PostgreSQL (with `users`, `artworks`, and more)
+- **Auth**: Keycloak (JWTs, roles, and all that jazz)
+- **Email**: Nodemailer (Gmail SMTP, because it’s free and slow)
+- **Anti-Bot**: Google reCAPTCHA
+- **File Storage**: Local uploads (paths in DB—keep it simple)
 
 ## **🏛️ Architecture & Business Rules**
 
-- **Keycloak Integration:**  
-  Centralized identity management with Keycloak handles user authentication, token issuance, and role enforcement. All protected endpoints require a valid JWT token that includes the user’s Keycloak ID and roles.
-  
-- **Email Verification & CAPTCHA:**  
-  To prevent abuse, new users must verify their email address. A unique token is sent to the user’s email after solving a CAPTCHA challenge (e.g., via Google reCAPTCHA). Users remain at a low trust level until they verify their email.
-  
-- **Role-Based Access Control (RBAC):**  
-  Roles are assigned in Keycloak and dictate access:
-  - **Buyers:** Can place orders, leave reviews.
-  - **Artists:** Can create and manage artwork.
-  - **Admins:** Have elevated privileges, such as managing orders, payments, and categories.
-  
-- **Data Integrity & Transactions:**  
-  Foreign key constraints ensure data consistency between users, artworks, orders, and payments. Each artwork can have multiple images stored and linked via an `artwork_images` table.
-  
-- **Audit & Security:**  
-  Rate limiting, CAPTCHA, and audit logs protect the platform against abuse and fraud, ensuring that only verified and trusted users can access sensitive features.
+- **Keycloak Integration**  
+  Keycloak runs the show—users register via API, verify emails, then grab tokens with `grant_type=password`. Protected endpoints (`/api/users/me`, etc.) demand a valid JWT with `keycloak.protect()`. Roles (`buyer`, `artist`, `admin`) gatekeep access.
 
+- **Email Verification**  
+  Newbies get a 6-digit code emailed post-signup—verify it to flip `is_verified` to `true` and unlock the good stuff. Codes last 1 hour (extended from 10 mins—Gmail delays suck).
+
+- **Role-Based Access Control (RBAC)**  
+  - **Buyers**: Order, review, message.
+  - **Artists**: Manage profiles/artworks, cash in on sales.
+  - **Admins**: Oversee orders, payments, categories.
+
+- **Data Integrity**  
+  Foreign keys tie `users` to `artworks`, `orders`, and `payments`. Multi-image support via `artwork_images`.
+
+- **Security**  
+  Rate limiting, reCAPTCHA, and logs keep the riffraff out. Trust levels (`NEW`, `VERIFIED`) scale with user actions.
 
 ## **🛠 Installation & Setup**
-### **1️⃣ Clone the Repository**
+
+### **1️⃣ Clone the Repo**
 ```bash
-`git clone https://github.com/your-username/digital-marketplace-backend.git`  
-`cd digital-marketplace-backend`
+git clone https://github.com/your-username/digital-marketplace-backend.git
+cd digital-marketplace-backend
+```
 
 ### **2️⃣ Install Dependencies**
 ```bash
-Run `npm install` to install all required packages
+npm install
 ```
 
 ### **3️⃣ Configure Environment Variables**
-Create a `.env` file in the root directory and add:
+Drop a `.env` in the root:
 ```env
-   - `DATABASE_URL`
-   - `SESSION_SECRET`
-   - `KEYCLOAK_URL`
-   - `KEYCLOAK_REALM`
-   - `KEYCLOAK_CLIENT_ID`
-   - `KEYCLOAK_CLIENT_SECRET`
-   - `RECAPTCHA_SECRET_KEY`
+DATABASE_URL=postgresql://user:password@localhost:5432/marketplace
+SESSION_SECRET=your-super-secret
+KEYCLOAK_URL=http://localhost:8080
+KEYCLOAK_REALM=digital-marketplace
+KEYCLOAK_ADMIN_CLIENT_ID=admin-cli
+KEYCLOAK_ADMIN_CLIENT_SECRET=your-admin-secret
+KEYCLOAK_CLIENT_ID=digital-marketplace-backend
+KEYCLOAK_CLIENT_SECRET=your-app-secret  # Omit if public client
+RECAPTCHA_SECRET_KEY=your-recaptcha-secret
+EMAIL_USER=your-gmail@gmail.com
+EMAIL_PASSWORD=your-app-password
+EMAIL_FROM=your-gmail@gmail.com
+SYSTEM_USER_ID=your-system-user-uuid
+PORT=3000
 ```
 
-### **4️⃣ Run Database Migrations**
-Ensure your PostgreSQL database is running and apply any migrations or schema updates.
+- **Keycloak**: Set up a realm (`digital-marketplace`), admin client (`admin-cli`), and app client (`digital-marketplace-backend`—public or confidential).
+- **Email**: Use Gmail with an App Password (2FA on).
+
+### **4️⃣ Run DB Migrations**
+Spin up PostgreSQL, then:
 ```bash
 npx knex migrate:latest
 ```
 
-### **5️⃣ Start the Server**
+### **5️⃣ Fire It Up**
 ```bash
 npm run dev
 ```
-
-The server will start on `http://localhost:3000`.
+Hits `http://localhost:3000`. Swagger UI at `/api-docs`.
 
 ## **📌 API Endpoints**
-### User & Account
-- **GET /api/users/me**  
-  Fetch the authenticated user’s profile.  
-- **PUT /api/users/me**  
-  Update the authenticated user’s profile.
 
-### Artist Management
-- **POST /api/artists**  
-  Create an artist profile (accessible only to users with the artist role).
-- **GET /api/artists**  
-  List all artist profiles.
-- **GET /api/artists/{id}**  
-  Fetch a specific artist profile.
-- **PUT /api/artists/{id}**  
-  Update an artist profile (artist only).
+### **User & Account**
+- **`POST /api/pre-register`**  
+  Sign up with email, name, password, reCAPTCHA. Triggers email verification.
+- **`POST /api/verify-email-code`**  
+  Verify with `code` and `email`—flips `is_verified`.
+- **`POST /api/resend-verification-code`**  
+  Resend code if Gmail’s napping.
+- **`GET /api/users/me`** *(protected)*  
+  Grab your profile—needs a Keycloak token.
+- **`PUT /api/users/me`** *(protected)*  
+  Update your name/email.
 
-### Artwork Management
-- **POST /api/artworks**  
-  Add new artwork with an image upload (artist only).
-- **POST /api/artworks/{id}/images**  
-  Upload additional images for an artwork (artist only).
-- **GET /api/artworks**  
-  Retrieve a list of all artworks along with their images.
-- **GET /api/artworks/{id}**  
-  Get details of a single artwork.
-- **PUT /api/artworks/{id}**  
-  Update artwork details (artist only).
-- **DELETE /api/artworks/{id}**  
-  Delete an artwork (artist or admin).
+### **Artist Management**
+- **`POST /api/artists`** *(artist)*  
+  Create your artist profile.
+- **`GET /api/artists`**  
+  List all artists.
+- **`GET /api/artists/{id}`**  
+  Peek at an artist.
+- **`PUT /api/artists/{id}`** *(artist)*  
+  Tweak your profile.
 
-### Categories
-- **POST /api/categories**  
-  Create a new category (admin only).
-- **GET /api/categories**  
-  Retrieve a list of all categories.
-- **PUT /api/categories/{id}**  
-  Update a category (admin only).
+### **Artwork Management**
+- **`POST /api/artworks`** *(artist)*  
+  Drop an artwork with an image.
+- **`POST /api/artworks/{id}/images`** *(artist)*  
+  Add more pics.
+- **`GET /api/artworks`**  
+  Browse all artworks.
+- **`GET /api/artworks/{id}`**  
+  Scope a single piece.
+- **`PUT /api/artworks/{id}`** *(artist)*  
+  Edit your work.
+- **`DELETE /api/artworks/{id}`** *(artist/admin)*  
+  Trash it.
 
-### Orders & Payments
-- **POST /api/orders**  
-  Place an order (buyer only).
-- **GET /api/orders**  
-  List orders for the authenticated user.
-- **GET /api/orders/{id}**  
-  Fetch details of a specific order.
-- **PUT /api/orders/{id}/status**  
-  Update order status (admin only).
-- **POST /api/payments**  
-  Create a payment record.
-- **GET /api/payments/{order_id}**  
-  Retrieve payment details for a specific order.
-- **PUT /api/payments/{id}/status**  
-  Update payment status (admin only).
+### **Categories**
+- **`POST /api/categories`** *(admin)*  
+  Add a category.
+- **`GET /api/categories`**  
+  List ‘em.
+- **`PUT /api/categories/{id}`** *(admin)*  
+  Update one.
 
-### Reviews & Messaging
-- **POST /api/reviews**  
-  Submit a review for an artwork (buyer only).
-- **GET /api/reviews/{artwork_id}**  
-  List reviews for a specific artwork.
-- **POST /api/messages**  
-  Send a message to another user.
+### **Orders & Payments**
+- **`POST /api/orders`** *(buyer)*  
+  Place an order.
+- **`GET /api/orders`** *(protected)*  
+  Your orders.
+- **`GET /api/orders/{id}`** *(protected)*  
+  Order details.
+- **`PUT /api/orders/{id}/status`** *(admin)*  
+  Update status.
+- **`POST /api/payments`** *(protected)*  
+  Start a payment.
+- **`GET /api/payments/{order_id}`** *(protected)*  
+  Payment status.
+- **`PUT /api/payments/{id}/status`** *(admin)*  
+  Finalize payment.
 
-### Search
-- **POST /api/search**  
-  Search artworks by title, artist name, or category.
+### **Reviews & Messaging**
+- **`POST /api/reviews`** *(buyer)*  
+  Rate an artwork.
+- **`GET /api/reviews/{artwork_id}`**  
+  See reviews.
+- **`POST /api/messages`** *(protected)*  
+  Send a message.
+
+### **Search**
+- **`POST /api/search`**  
+  Hunt artworks by title, artist, or category.
 
 ## **🛠 Contributing**
-1. Fork the repository.
-2. Create a new feature branch.
-3. Commit your changes with clear commit messages.
-4. Open a pull request for review.
+1. Fork it.
+2. Branch it: `git checkout -b feature/your-thing`.
+3. Commit it: `git commit -m "Add some dope shit"`.
+4. Push it: `git push origin feature/your-thing`.
+5. PR it—let’s roast it together.
 
 ## **📜 License**
-This project is open-source under the **non-existent** license(**unlicensed😉**)
+Unlicensed—free as a bird, no chains. Do what you want, just don’t blame me if it breaks!
 
 ---
-### **📌 Feel free to modify or expand this README as your project evolves. Let's build an amazing digital marketplace together! 🚀**
 
+### **📌 Notes**
+- **Keycloak Token**: Hit `/realms/digital-marketplace/protocol/openid-connect/token` with `grant_type=password`—we’re still ironing out “Account not fully set up” kinks (check flows, required actions).
+- **Gmail**: Codes might lag—1-hour expiration saves the day.
+
+Let’s build this marketplace into a legend—drop a star if you’re vibing! 🚀
+
+---
