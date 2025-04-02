@@ -13,7 +13,7 @@ const swaggerUI = require('swagger-ui-express');
 const fs = require('fs');
 const { pool } = require('./db');
 const { sendVerificationEmail } = require('./services/emailService');
-const { createVerificationToken, verifyToken } = require('./services/verificationService');
+const { createVerificationCode, verifyCode } = require('./services/verificationService');
 const { verifyRecaptcha } = require('./services/recaptchaService');
 
 const { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter } = require('./middleware/rateLimiter');
@@ -59,8 +59,17 @@ app.post('/api/pre-register', registrationLimiter, async (req, res) => {
   }
 
   try {
+    // Check if email already exists
+    const { rows: existingUser } = await pool.query(
+      'SELECT * FROM users WHERE email = $1',
+      [email]
+    );
+    if (existingUser.length > 0) {
+      return res.status(409).json({ error: 'Email already registered' });
+    }
+
     const adminToken = await axios.post(
-      `${process.env.KEYCLOAK_URL}/realms/master/protocol/openid-connect/token`,
+      `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
       new URLSearchParams({
         grant_type: 'client_credentials',
         client_id: process.env.KEYCLOAK_ADMIN_CLIENT_ID,
@@ -94,12 +103,15 @@ app.post('/api/pre-register', registrationLimiter, async (req, res) => {
       [keycloakId, name, email, 'buyer', false, TRUST_LEVELS.NEW]
     );
 
-    const code = await createVerificationCode(keycloakId); // Changed from token
+    const code = await createVerificationCode(keycloakId);
     await sendVerificationEmail(rows[0], code);
 
     res.status(201).json({ message: 'User registered, enter the code from your email in the app' });
   } catch (error) {
-    console.error('Registration error:', error.message);
+    console.error('Registration error:', error.response?.data || error.message);
+    if (error.message.includes('duplicate key')) {
+      return res.status(409).json({ error: 'Email already registered' });
+    }
     res.status(500).json({ error: 'Registration failed', details: error.message });
   }
 });
@@ -109,7 +121,6 @@ app.post('/api/verify-email-code', registrationLimiter, async (req, res) => {
   if (!code) return res.status(400).json({ error: 'Missing code' });
 
   try {
-    // Get user ID from Keycloak token (assuming user is logged in after registration)
     const keycloakId = req.kauth?.grant?.access_token?.content?.sub;
     if (!keycloakId) return res.status(401).json({ error: 'User not authenticated' });
 
@@ -117,7 +128,7 @@ app.post('/api/verify-email-code', registrationLimiter, async (req, res) => {
     if (!result.valid) return res.status(400).json({ error: 'Invalid or expired code' });
 
     const adminToken = await axios.post(
-      `${process.env.KEYCLOAK_URL}/realms/master/protocol/openid-connect/token`,
+      `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
       new URLSearchParams({
         grant_type: 'client_credentials',
         client_id: process.env.KEYCLOAK_ADMIN_CLIENT_ID,

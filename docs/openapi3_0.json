@@ -97,7 +97,10 @@
           "payment_id": { "type": "integer" },
           "order_id": { "type": "integer" },
           "amount": { "type": "number", "format": "float" },
-          "status": { "type": "string", "enum": ["pending", "completed", "failed"] }
+          "status": { "type": "string", "enum": ["pending", "completed", "failed"] },
+          "payment_method": { "type": "string", "enum": ["paypal", "orange_money", "myzaka"] },
+          "payment_url": { "type": "string" },
+          "payment_ref": { "type": "string" }
         },
         "required": ["payment_id", "order_id", "amount", "status"]
       },
@@ -125,15 +128,33 @@
       "PreRegisterRequest": {
         "type": "object",
         "properties": {
-          "recaptchaToken": { "type": "string" }
+          "recaptchaToken": { "type": "string", "description": "reCAPTCHA token for bot verification" },
+          "email": { "type": "string", "format": "email", "description": "User's email address" },
+          "name": { "type": "string", "description": "User's full name" },
+          "password": { "type": "string", "format": "password", "description": "User's password" }
         },
-        "required": ["recaptchaToken"]
+        "required": ["recaptchaToken", "email", "name", "password"]
+      },
+      "PreRegisterResponse": {
+        "type": "object",
+        "properties": {
+          "message": { "type": "string", "description": "Confirmation message" }
+        },
+        "required": ["message"]
+      },
+      "VerifyEmailCodeRequest": {
+        "type": "object",
+        "properties": {
+          "code": { "type": "string", "description": "Verification code sent to user's email" }
+        },
+        "required": ["code"]
       },
       "VerifyEmailResponse": {
         "type": "object",
         "properties": {
-          "message": { "type": "string" }
-        }
+          "message": { "type": "string", "description": "Verification status message" }
+        },
+        "required": ["message"]
       },
       "Error": {
         "type": "object",
@@ -152,7 +173,7 @@
     "/api/pre-register": {
       "post": {
         "summary": "Pre-register user",
-        "description": "Verifies reCAPTCHA before redirecting to Keycloak registration.",
+        "description": "Registers a user with Keycloak and sends a verification code to their email. No redirect is performed.",
         "requestBody": {
           "required": true,
           "content": {
@@ -162,49 +183,85 @@
           }
         },
         "responses": {
-          "200": {
-            "description": "Registration redirect URL",
+          "201": {
+            "description": "User registered successfully, verification code sent",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "redirect": { "type": "string" }
-                  }
-                }
+                "schema": { "$ref": "#/components/schemas/PreRegisterResponse" },
+                "example": { "message": "User registered, enter the code from your email in the app" }
               }
             }
           },
           "400": {
-            "description": "reCAPTCHA required or verification failed",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+            "description": "Missing required fields or reCAPTCHA verification failed",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "Missing required fields" }
+              }
+            }
+          },
+          "500": {
+            "description": "Registration failed due to server error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "Registration failed", "details": "Internal server error" }
+              }
+            }
           }
         }
       }
     },
-    "/api/verify-email": {
-      "get": {
-        "summary": "Verify email",
-        "description": "Verifies a user's email with a token.",
-        "parameters": [
-          {
-            "name": "token",
-            "in": "query",
-            "required": true,
-            "schema": { "type": "string" },
-            "description": "Verification token"
+    "/api/verify-email-code": {
+      "post": {
+        "summary": "Verify email with code",
+        "description": "Verifies a user's email using a code sent to their email, updates Keycloak and local trust level.",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/VerifyEmailCodeRequest" }
+            }
           }
-        ],
+        },
         "responses": {
           "200": {
-            "description": "Email verified",
+            "description": "Email verified successfully",
             "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/VerifyEmailResponse" } }
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/VerifyEmailResponse" },
+                "example": { "message": "Email verified" }
+              }
             }
           },
           "400": {
-            "description": "Missing or invalid token",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+            "description": "Missing or invalid code",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "Invalid or expired code" }
+              }
+            }
+          },
+          "401": {
+            "description": "User not authenticated",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "User not authenticated" }
+              }
+            }
+          },
+          "500": {
+            "description": "Verification failed due to server error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "Verification failed", "details": "Internal server error" }
+              }
+            }
           }
         }
       }
@@ -832,76 +889,64 @@
         }
       }
     },
-"/api/payments": {
-  "post": {
-    "summary": "Initiate a payment for an order",
-    "security": [
-      {
-        "bearerAuth": []
-      }
-    ],
-    "requestBody": {
-      "required": true,
-      "content": {
-        "application/json": {
-          "schema": {
-            "type": "object",
-            "properties": {
-              "order_id": {
-                "type": "string",
-                "example": "order_123"
-              },
-              "amount": {
-                "type": "number",
-                "example": 50.00
-              },
-              "payment_method": {
-                "type": "string",
-                "example": "paypal"
-              },
-              "phone_number": {
-                "type": "string",
-                "example": "+26712345678"
+    "/api/payments": {
+      "post": {
+        "summary": "Initiate a payment for an order",
+        "description": "Initiates a payment for an order using PayPal or mobile money.",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "order_id": { "type": "integer", "example": 123 },
+                  "amount": { "type": "number", "format": "float", "example": 50.00 },
+                  "payment_method": { "type": "string", "enum": ["paypal", "orange_money", "myzaka"], "example": "paypal" },
+                  "phone_number": { "type": "string", "example": "+26712345678", "description": "Required for mobile money payments" }
+                },
+                "required": ["order_id", "amount", "payment_method"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Payment initiated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "paymentUrl": { "type": "string" }
+                  }
+                },
+                "example": { "paymentUrl": "https://paypal.com/approve/123" }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "Amount must be a positive number" }
+              }
+            }
+          },
+          "500": {
+            "description": "Server error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "Failed to initiate payment" }
               }
             }
           }
         }
       }
     },
-    "responses": {
-      "201": {
-        "description": "Payment initiated",
-        "content": {
-          "application/json": {
-            "example": {
-              "paymentUrl": "https://paypal.com/approve/123"
-            }
-          }
-        }
-      },
-      "400": {
-        "description": "Invalid input",
-        "content": {
-          "application/json": {
-            "example": {
-              "error": "Amount must be a positive number"
-            }
-          }
-        }
-      },
-      "500": {
-        "description": "Server error",
-        "content": {
-          "application/json": {
-            "example": {
-              "error": "Failed to initiate payment"
-            }
-          }
-        }
-      }
-    }
-  }
-},
     "/api/payments/{order_id}": {
       "get": {
         "summary": "List payments for order",
@@ -966,9 +1011,11 @@
         }
       }
     },
-    "/payment-callback": {
+    "/api/payments/confirm": {
       "post": {
-        "summary": "Handle PayPal payment callback",
+        "summary": "Confirm a USSD payment",
+        "description": "Confirms a payment made via Orange Money or MyZaka.",
+        "security": [{ "BearerAuth": [] }],
         "requestBody": {
           "required": true,
           "content": {
@@ -976,130 +1023,125 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "payment_status": {
-                    "type": "string",
-                    "example": "Completed"
-                 },
-                "txn_id": {
-                  "type": "string",
-                  "example": "txn_456"
+                  "order_id": { "type": "integer", "example": 123 },
+                  "transaction_ref": { "type": "string", "example": "orange_money-123-1698765432" }
                 },
-                "custom": {
-                  "type": "string",
-                  "example": "order_123"
-                }
-              }
-            }
-          }
-        }
-      },
-      "responses": {
-        "200": {
-          "description": "Callback processed",
-          "content": {
-            "application/json": {
-              "example": {
-                "status": "Processed"
-              }
-            } 
-          }
-        },
-        "404": {
-          "description": "Payment not found",
-          "content": {
-            "application/json": {
-              "example": {
-                "error": "Payment not found"
+                "required": ["order_id", "transaction_ref"]
               }
             }
           }
         },
-        "500": {
-          "description": "Callback processing failed",
-          "content": {
-            "application/json": {
-              "example": {
-                "error": "Callback processing failed"
+        "responses": {
+          "200": {
+            "description": "Payment confirmed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string" }
+                  }
+                },
+                "example": { "message": "Payment confirmed" }
               }
             }
-          }
-        }
-      }
-    }
-  },
-  "/api/payments/confirm": {
-  "post": {
-    "summary": "Confirm a USSD payment",
-    "security": [
-      {
-        "bearerAuth": []
-      }
-    ],
-    "requestBody": {
-      "required": true,
-      "content": {
-        "application/json": {
-          "schema": {
-            "type": "object",
-            "properties": {
-              "order_id": {
-                "type": "string",
-                "example": "order_123"
-              },
-              "transaction_ref": {
-                "type": "string",
-                "example": "orange_money-order_123-1698765432"
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "Invalid transaction reference" }
+              }
+            }
+          },
+          "404": {
+            "description": "Payment not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "Payment not found" }
+              }
+            }
+          },
+          "500": {
+            "description": "Confirmation failed",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "Confirmation failed" }
               }
             }
           }
         }
       }
     },
-    "responses": {
-      "200": {
-        "description": "Payment confirmed",
-        "content": {
-          "application/json": {
-            "example": {
-              "message": "Payment confirmed"
+    "/payment-callback": {
+      "post": {
+        "summary": "Handle PayPal payment callback",
+        "description": "Processes PayPal payment callbacks.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "payment_status": { "type": "string", "example": "Completed" },
+                  "txn_id": { "type": "string", "example": "txn_456" },
+                  "custom": { "type": "integer", "example": 123, "description": "Order ID" }
+                },
+                "required": ["payment_status", "txn_id", "custom"]
+              }
             }
           }
-        }
-      },
-      "400": {
-        "description": "Invalid input",
-        "content": {
-          "application/json": {
-            "example": {
-              "error": "Invalid transaction reference"
+        },
+        "responses": {
+          "200": {
+            "description": "Callback processed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string" }
+                  }
+                },
+                "example": { "status": "Processed" }
+              }
             }
-          }
-        }
-      },
-      "404": {
-        "description": "Payment not found",
-        "content": {
-          "application/json": {
-            "example": {
-              "error": "Payment not found"
+          },
+          "403": {
+            "description": "Unauthorized callback attempt",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "Unauthorized" }
+              }
             }
-          }
-        }
-      },
-      "500": {
-        "description": "Confirmation failed",
-        "content": {
-          "application/json": {
-            "example": {
-              "error": "Confirmation failed"
+          },
+          "404": {
+            "description": "Payment not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "Payment not found" }
+              }
+            }
+          },
+          "500": {
+            "description": "Callback processing failed",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "Callback processing failed" }
+              }
             }
           }
         }
       }
-    }
-  }
-},
-  "/api/reviews": {
+    },
+    "/api/reviews": {
       "post": {
         "summary": "Leave a review",
         "description": "Creates a review for an artwork (requires 'buyer' role).",
