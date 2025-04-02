@@ -9,15 +9,18 @@ const transporter = nodemailer.createTransport({
 });
 
 const sendEmail = async (to, subject, html) => {
+  const sendTime = new Date().toISOString();
+  console.log('Sending email to:', to, 'at:', sendTime);
+
   const mailOptions = {
     from: `"Art Marketplace" <${process.env.EMAIL_FROM}>`,
     to,
     subject,
-    html
+    html,
   };
   try {
     const info = await transporter.sendMail(mailOptions);
-    console.log('Email sent successfully:', info.response);
+    console.log('Email sent successfully:', info.response, 'at:', new Date().toISOString());
     return info;
   } catch (error) {
     console.error('Email sending failed:', error.message);

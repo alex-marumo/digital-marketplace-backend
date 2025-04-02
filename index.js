@@ -117,12 +117,13 @@ app.post('/api/pre-register', registrationLimiter, async (req, res) => {
 });
 
 app.post('/api/verify-email-code', registrationLimiter, async (req, res) => {
-  const { code } = req.body;
-  if (!code) return res.status(400).json({ error: 'Missing code' });
+  const { code, email } = req.body;
+  if (!code || !email) return res.status(400).json({ error: 'Missing code or email' });
 
   try {
-    const keycloakId = req.kauth?.grant?.access_token?.content?.sub;
-    if (!keycloakId) return res.status(401).json({ error: 'User not authenticated' });
+    const { rows } = await pool.query('SELECT keycloak_id FROM users WHERE email = $1', [email]);
+    if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    const keycloakId = rows[0].keycloak_id;
 
     const result = await verifyCode(keycloakId, code);
     if (!result.valid) return res.status(400).json({ error: 'Invalid or expired code' });
@@ -148,11 +149,40 @@ app.post('/api/verify-email-code', registrationLimiter, async (req, res) => {
       }
     );
 
+    // Add this: Update users table
+    await pool.query(
+      'UPDATE users SET is_verified = $1 WHERE keycloak_id = $2',
+      [true, result.userId]
+    );
+
     await updateTrustLevel(result.userId, TRUST_LEVELS.VERIFIED);
     res.json({ message: 'Email verified' });
   } catch (error) {
     console.error('Code verification error:', error.message);
     res.status(500).json({ error: 'Verification failed', details: error.message });
+  }
+});
+
+app.post('/api/resend-verification-code', registrationLimiter, async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Missing email' });
+
+  try {
+    // Find the user by email
+    const { rows } = await pool.query('SELECT keycloak_id, name FROM users WHERE email = $1 AND is_verified = $2', [email, false]);
+    if (rows.length === 0) return res.status(404).json({ error: 'User not found or already verified' });
+
+    const user = rows[0];
+    const keycloakId = user.keycloak_id;
+
+    // Generate and send a new code
+    const code = await createVerificationCode(keycloakId);
+    await sendVerificationEmail({ email, name: user.name }, code);
+
+    res.json({ message: 'New verification code sent' });
+  } catch (error) {
+    console.error('Resend error:', error.message);
+    res.status(500).json({ error: 'Failed to resend code', details: error.message });
   }
 });
 

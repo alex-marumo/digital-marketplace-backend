@@ -216,13 +216,29 @@
     "/api/verify-email-code": {
       "post": {
         "summary": "Verify email with code",
-        "description": "Verifies a user's email using a code sent to their email, updates Keycloak and local trust level.",
-        "security": [{ "BearerAuth": [] }],
+        "description": "Verifies a user's email using a code sent to their email. No authentication token required; uses email to identify the user.",
+        "tags": ["User"],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/VerifyEmailCodeRequest" }
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "description": "6-digit verification code sent to the user's email",
+                    "example": "123456"
+                  },
+                  "email": {
+                    "type": "string",
+                    "format": "email",
+                    "description": "User's email address used during registration",
+                    "example": "alexmarumo16@gmail.com"
+                  }
+                },
+                "required": ["code", "email"]
+              }
             }
           }
         },
@@ -231,41 +247,143 @@
             "description": "Email verified successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/VerifyEmailResponse" },
-                "example": { "message": "Email verified" }
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string" }
+                  },
+                  "example": { "message": "Email verified" }
+                }
               }
             }
           },
           "400": {
-            "description": "Missing or invalid code",
+            "description": "Missing or invalid code/email",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Error" },
-                "example": { "error": "Invalid or expired code" }
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": { "type": "string" }
+                  },
+                  "example": { "error": "Missing code or email" }
+                }
               }
             }
           },
-          "401": {
-            "description": "User not authenticated",
+          "404": {
+            "description": "User not found",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Error" },
-                "example": { "error": "User not authenticated" }
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                  "error": { "type": "string" }
+                },
+                "example": { "error": "User not found" }
               }
             }
-          },
-          "500": {
-            "description": "Verification failed due to server error",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/Error" },
+          }
+        },
+        "429": {
+          "description": "Too many requests",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "error": { "type": "string" }
+                },
+                "example": { "error": "Too many requests" }
+              }
+            }
+          }
+        },
+        "500": {
+          "description": "Verification failed due to server error",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "error": { "type": "string" },
+                  "details": { "type": "string" }
+                },
                 "example": { "error": "Verification failed", "details": "Internal server error" }
               }
             }
           }
         }
       }
-    },
+    }
+   },
+    "/api/resend-verification-code": {
+      "post": {
+       "summary": "Resend verification code",
+       "description": "Resends a new verification code to the user's email if the previous one expired or was lost. User must not be verified yet.",
+      "requestBody": {
+       "required": true,
+        "content": {
+         "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "email": { "type": "string", "format": "email", "description": "User's email address" }
+              },
+             "required": ["email"]
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "New verification code sent successfully",
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/VerifyEmailResponse" },
+              "example": { "message": "New verification code sent" }
+            }
+          }
+        },
+        "400": {
+          "description": "Missing email",
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/Error" },
+              "example": { "error": "Missing email" }
+            } 
+          }
+        },
+        "404": {
+          "description": "User not found or already verified",
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/Error" },
+              "example": { "error": "User not found or already verified" }
+            }
+          }
+        },
+        "429": {
+          "description": "Too many requests",
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/Error" },
+              "example": { "error": "Too many requests" }
+            }
+          }
+        },
+        "500": {
+          "description": "Failed to resend code due to server error",
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/Error" },
+              "example": { "error": "Failed to resend code", "details": "Internal server error" }
+            }
+          }
+        }
+      }
+    }
+  },
     "/api/users/me": {
       "get": {
         "summary": "Fetch current user's profile",
