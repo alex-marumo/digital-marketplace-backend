@@ -1,7 +1,6 @@
 const nodemailer = require('nodemailer');
 
 // Transporter unchanged
-// Transporter unchanged
 const transporter = nodemailer.createTransport({
   host: process.env.EMAIL_HOST,
   port: process.env.EMAIL_PORT,
@@ -40,5 +39,4 @@ const sendVerificationEmail = async (user, code) => {
   return sendEmail(user.email, 'Email Verification Code', html);
 };
 
-module.exports = { sendEmail, sendVerificationEmail };
 module.exports = { sendEmail, sendVerificationEmail };
