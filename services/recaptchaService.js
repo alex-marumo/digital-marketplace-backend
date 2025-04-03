@@ -2,6 +2,7 @@ const axios = require('axios');
 const qs = require('qs');
 
 const verifyRecaptcha = async (token) => {
+  console.log('Verifying reCAPTCHA with:', { secret: process.env.RECAPTCHA_SECRET_KEY ? '****' : 'MISSING', token });
   try {
     const response = await axios.post(
       'https://www.google.com/recaptcha/api/siteverify',
