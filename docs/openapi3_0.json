@@ -3,7 +3,7 @@
   "info": {
     "title": "Digital Marketplace API",
     "version": "1.0.0",
-    "description": "API documentation for the Digital Marketplace backend. This backend handles user management (via Keycloak), artist and artwork management, orders, payments, reviews, messages, and search functionality. Rate limiting is applied on sensitive endpoints."
+    "description": "API documentation for the Digital Marketplace backend. Handles user management (via Keycloak), artist verification with ID/proof uploads, artwork management, orders, payments, reviews, messages, and search. Rate limiting applies on sensitive endpoints."
   },
   "servers": [
     {
@@ -30,18 +30,31 @@
           "email": { "type": "string" },
           "role": { "type": "string", "enum": ["buyer", "artist", "admin"] },
           "is_verified": { "type": "boolean" },
-          "trust_level": { "type": "string" }
+          "trust_level": { "type": "integer" }
         },
         "required": ["user_id", "keycloak_id", "name", "email", "role"]
       },
       "Artist": {
         "type": "object",
         "properties": {
-          "user_id": { "type": "string", "format": "uuid", "description": "Keycloak user ID of the artist" },
-          "bio": { "type": "string" },
-          "portfolio": { "type": "string" }
+          "user_id": { "type": "string", "format": "uuid", "description": "Keycloak user ID of the artist" }
         },
-        "required": ["user_id", "bio", "portfolio"]
+        "required": ["user_id"]
+      },
+      "ArtistRequest": {
+        "type": "object",
+        "properties": {
+          "request_id": { "type": "integer", "description": "Unique request ID" },
+          "user_id": { "type": "string", "format": "uuid", "description": "Keycloak user ID" },
+          "id_document_path": { "type": "string", "description": "Path to uploaded ID document" },
+          "proof_of_work_path": { "type": "string", "description": "Path to uploaded proof of work" },
+          "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+          "rejection_reason": { "type": "string" },
+          "requested_at": { "type": "string", "format": "date-time" },
+          "reviewed_at": { "type": "string", "format": "date-time" },
+          "reviewed_by": { "type": "string", "format": "uuid", "description": "Keycloak ID of reviewing admin" }
+        },
+        "required": ["request_id", "user_id", "status"]
       },
       "Artwork": {
         "type": "object",
@@ -145,9 +158,10 @@
       "VerifyEmailCodeRequest": {
         "type": "object",
         "properties": {
-          "code": { "type": "string", "description": "Verification code sent to user's email" }
+          "code": { "type": "string", "description": "Verification code sent to user's email" },
+          "email": { "type": "string", "format": "email", "description": "User's email address" }
         },
-        "required": ["code"]
+        "required": ["code", "email"]
       },
       "VerifyEmailResponse": {
         "type": "object",
@@ -173,7 +187,7 @@
     "/api/pre-register": {
       "post": {
         "summary": "Pre-register user",
-        "description": "Registers a user with Keycloak and sends a verification code to their email. No redirect is performed.",
+        "description": "Registers a user with Keycloak and sends a verification code to their email.",
         "requestBody": {
           "required": true,
           "content": {
@@ -216,29 +230,13 @@
     "/api/verify-email-code": {
       "post": {
         "summary": "Verify email with code",
-        "description": "Verifies a user's email using a code sent to their email. No authentication token required; uses email to identify the user.",
+        "description": "Verifies a user's email using a code sent to their email.",
         "tags": ["User"],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "code": {
-                    "type": "string",
-                    "description": "6-digit verification code sent to the user's email",
-                    "example": "123456"
-                  },
-                  "email": {
-                    "type": "string",
-                    "format": "email",
-                    "description": "User's email address used during registration",
-                    "example": "alexmarumo16@gmail.com"
-                  }
-                },
-                "required": ["code", "email"]
-              }
+              "schema": { "$ref": "#/components/schemas/VerifyEmailCodeRequest" }
             }
           }
         },
@@ -247,13 +245,8 @@
             "description": "Email verified successfully",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "message": { "type": "string" }
-                  },
-                  "example": { "message": "Email verified" }
-                }
+                "schema": { "$ref": "#/components/schemas/VerifyEmailResponse" },
+                "example": { "message": "Email verified" }
               }
             }
           },
@@ -261,13 +254,8 @@
             "description": "Missing or invalid code/email",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "error": { "type": "string" }
-                  },
-                  "example": { "error": "Missing code or email" }
-                }
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "Missing code or email" }
               }
             }
           },
@@ -275,115 +263,99 @@
             "description": "User not found",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                  "error": { "type": "string" }
-                },
+                "schema": { "$ref": "#/components/schemas/Error" },
                 "example": { "error": "User not found" }
               }
             }
-          }
-        },
-        "429": {
-          "description": "Too many requests",
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "error": { "type": "string" }
-                },
+          },
+          "429": {
+            "description": "Too many requests",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
                 "example": { "error": "Too many requests" }
               }
             }
-          }
-        },
-        "500": {
-          "description": "Verification failed due to server error",
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "error": { "type": "string" },
-                  "details": { "type": "string" }
-                },
+          },
+          "500": {
+            "description": "Verification failed due to server error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
                 "example": { "error": "Verification failed", "details": "Internal server error" }
               }
             }
           }
         }
       }
-    }
-   },
+    },
     "/api/resend-verification-code": {
       "post": {
-       "summary": "Resend verification code",
-       "description": "Resends a new verification code to the user's email if the previous one expired or was lost. User must not be verified yet.",
-      "requestBody": {
-       "required": true,
-        "content": {
-         "application/json": {
-            "schema": {
-              "type": "object",
-              "properties": {
-                "email": { "type": "string", "format": "email", "description": "User's email address" }
-              },
-             "required": ["email"]
-            }
-          }
-        }
-      },
-      "responses": {
-        "200": {
-          "description": "New verification code sent successfully",
+        "summary": "Resend verification code",
+        "description": "Resends a new verification code to the user's email if not verified.",
+        "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/VerifyEmailResponse" },
-              "example": { "message": "New verification code sent" }
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": { "type": "string", "format": "email", "description": "User's email address" }
+                },
+                "required": ["email"]
+              }
             }
           }
         },
-        "400": {
-          "description": "Missing email",
-          "content": {
-            "application/json": {
-              "schema": { "$ref": "#/components/schemas/Error" },
-              "example": { "error": "Missing email" }
-            } 
-          }
-        },
-        "404": {
-          "description": "User not found or already verified",
-          "content": {
-            "application/json": {
-              "schema": { "$ref": "#/components/schemas/Error" },
-              "example": { "error": "User not found or already verified" }
+        "responses": {
+          "200": {
+            "description": "New verification code sent successfully",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/VerifyEmailResponse" },
+                "example": { "message": "New verification code sent" }
+              }
             }
-          }
-        },
-        "429": {
-          "description": "Too many requests",
-          "content": {
-            "application/json": {
-              "schema": { "$ref": "#/components/schemas/Error" },
-              "example": { "error": "Too many requests" }
+          },
+          "400": {
+            "description": "Missing email",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "Missing email" }
+              }
             }
-          }
-        },
-        "500": {
-          "description": "Failed to resend code due to server error",
-          "content": {
-            "application/json": {
-              "schema": { "$ref": "#/components/schemas/Error" },
-              "example": { "error": "Failed to resend code", "details": "Internal server error" }
+          },
+          "404": {
+            "description": "User not found or already verified",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "User not found or already verified" }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "Too many requests" }
+              }
+            }
+          },
+          "500": {
+            "description": "Failed to resend code due to server error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "Failed to resend code", "details": "Internal server error" }
+              }
             }
           }
         }
       }
-    }
-  },
+    },
     "/api/users/me": {
       "get": {
         "summary": "Fetch current user's profile",
@@ -436,11 +408,63 @@
         }
       }
     },
-    "/api/artists": {
+    "/api/request-artist": {
       "post": {
-        "summary": "Create artist profile",
-        "description": "Creates an artist profile (requires 'artist' role).",
-        "security": [{ "BearerAuth": ["realm:artist"] }],
+        "summary": "Request artist status",
+        "description": "Submits an artist verification request with ID and proof-of-work uploads (requires email-verified user).",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "idDocument": { "type": "string", "format": "binary", "description": "Government-issued ID (PDF/JPG/PNG, max 5MB)" },
+                  "proofOfWork": { "type": "string", "format": "binary", "description": "Proof of artwork ownership (PDF/JPG/PNG, max 5MB)" }
+                },
+                "required": ["idDocument", "proofOfWork"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Artist request submitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string" },
+                    "requestId": { "type": "integer" }
+                  },
+                  "example": { "message": "Artist request submitted—awaiting admin review", "requestId": 1 }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required files",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "Missing ID document or proof of work" } } }
+          },
+          "403": {
+            "description": "Must be email-verified",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "409": {
+            "description": "Request already pending or approved",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "Artist request already pending" } } }
+          },
+          "500": { "description": "Server error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/review-artist-request": {
+      "post": {
+        "summary": "Review artist request",
+        "description": "Approves or rejects an artist request (requires 'admin' role). Approvals sync 'artist' role in Keycloak and DB.",
+        "security": [{ "BearerAuth": ["realm:admin"] }],
         "requestBody": {
           "required": true,
           "content": {
@@ -448,26 +472,51 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "bio": { "type": "string" },
-                  "portfolio": { "type": "string" }
+                  "requestId": { "type": "integer", "description": "Artist request ID" },
+                  "approve": { "type": "boolean", "description": "Approval decision" },
+                  "rejectionReason": { "type": "string", "description": "Reason for rejection (required if approve=false)" }
                 },
-                "required": ["bio", "portfolio"]
+                "required": ["requestId", "approve"]
               }
             }
           }
         },
         "responses": {
-          "201": {
-            "description": "Artist profile created",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Artist" } } }
+          "200": {
+            "description": "Request reviewed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string" }
+                  },
+                  "example": { "message": "Artist approved—roles assigned" }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required fields",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "Missing requestId, approve flag, or rejection reason" } } }
           },
           "403": {
-            "description": "Requires artist role",
+            "description": "Requires admin role",
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
           },
-          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+          "404": {
+            "description": "Request not found",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "409": {
+            "description": "Request already reviewed",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "Request already reviewed" } } }
+          },
+          "500": { "description": "Server error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
         }
-      },
+      }
+    },
+    "/api/artists": {
       "get": {
         "summary": "List all artists",
         "description": "Returns all artist profiles.",
@@ -497,39 +546,6 @@
           "200": {
             "description": "Artist details",
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Artist" } } }
-          },
-          "404": {
-            "description": "Artist not found",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
-          },
-          "500": { "description": "Database error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
-        }
-      },
-      "put": {
-        "summary": "Update artist profile",
-        "description": "Updates an artist profile (requires 'artist' role and matching ID).",
-        "security": [{ "BearerAuth": ["realm:artist"] }],
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": { "type": "string", "format": "uuid" },
-            "description": "Artist's Keycloak UUID"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": { "application/json": { "schema": { "type": "object", "properties": { "bio": { "type": "string" }, "portfolio": { "type": "string" } }, "required": ["bio", "portfolio"] } } }
-        },
-        "responses": {
-          "200": {
-            "description": "Artist profile updated",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Artist" } } }
-          },
-          "403": {
-            "description": "Unauthorized",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
           },
           "404": {
             "description": "Artist not found",
@@ -710,10 +726,7 @@
                 "properties": {
                   "images": {
                     "type": "array",
-                    "items": {
-                      "type": "string",
-                      "format": "binary"
-                    },
+                    "items": { "type": "string", "format": "binary" },
                     "maxItems": 5
                   }
                 },

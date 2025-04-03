@@ -17,8 +17,8 @@ const { createVerificationCode, verifyCode } = require('./services/verificationS
 const { verifyRecaptcha } = require('./services/recaptchaService');
 
 const { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter } = require('./middleware/rateLimiter');
-console.log('Rate Limiters:', { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter })
-console.log('SYSTEM_USER_ID:', process.env.SYSTEM_USER_ID)
+console.log('Rate Limiters:', { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter });
+console.log('SYSTEM_USER_ID:', process.env.SYSTEM_USER_ID);
 
 const { requireTrustLevel } = require('./middleware/trustLevel');
 const { TRUST_LEVELS, updateTrustLevel, updateUserTrustAfterOrder } = require('./services/trustService');
@@ -29,14 +29,14 @@ const swaggerData = JSON.parse(fs.readFileSync(swaggerFile, 'utf8'));
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Middleware setup (unchanged)
+// Middleware setup
 app.use('/api-docs', swaggerUI.serve, swaggerUI.setup(swaggerData));
 app.use(express.json());
 app.use(cors());
 app.use(bodyParser.json());
 app.use(keycloak.middleware());
 
-// Multer setup (unchanged)
+// Multer setup for general uploads (artworks)
 const storage = multer.diskStorage({
   destination: './uploads/',
   filename: (req, file, cb) => {
@@ -44,6 +44,32 @@ const storage = multer.diskStorage({
   },
 });
 const upload = multer({ storage });
+
+// Multer setup for artist verification
+const artistStorage = multer.diskStorage({
+  destination: './uploads/artist_verification/',
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (!['.pdf', '.jpg', '.jpeg', '.png'].includes(ext)) {
+      return cb(new Error('Invalid file type—only PDF, JPG, PNG allowed'));
+    }
+    cb(null, `${req.kauth.grant.access_token.content.sub}-${Date.now()}${ext}`);
+  },
+});
+const artistUpload = multer({
+  storage: artistStorage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (!['.pdf', '.jpg', '.jpeg', '.png'].includes(ext)) {
+      return cb(new Error('Invalid file type'));
+    }
+    cb(null, true);
+  },
+}).fields([
+  { name: 'idDocument', maxCount: 1 },
+  { name: 'proofOfWork', maxCount: 1 },
+]);
 
 // --- User Routes ---
 
@@ -59,7 +85,6 @@ app.post('/api/pre-register', registrationLimiter, async (req, res) => {
   }
 
   try {
-    // Check if email already exists
     const { rows: existingUser } = await pool.query(
       'SELECT * FROM users WHERE email = $1',
       [email]
@@ -149,7 +174,6 @@ app.post('/api/verify-email-code', registrationLimiter, async (req, res) => {
       }
     );
 
-    // Add this: Update users table
     await pool.query(
       'UPDATE users SET is_verified = $1 WHERE keycloak_id = $2',
       [true, result.userId]
@@ -168,14 +192,12 @@ app.post('/api/resend-verification-code', registrationLimiter, async (req, res) 
   if (!email) return res.status(400).json({ error: 'Missing email' });
 
   try {
-    // Find the user by email
     const { rows } = await pool.query('SELECT keycloak_id, name FROM users WHERE email = $1 AND is_verified = $2', [email, false]);
     if (rows.length === 0) return res.status(404).json({ error: 'User not found or already verified' });
 
     const user = rows[0];
     const keycloakId = user.keycloak_id;
 
-    // Generate and send a new code
     const code = await createVerificationCode(keycloakId);
     await sendVerificationEmail({ email, name: user.name }, code);
 
@@ -201,8 +223,8 @@ app.get('/api/users/me', keycloak.protect(), authGetLimiter, async (req, res) =>
         'INSERT INTO users (keycloak_id, name, email, role, is_verified, trust_level) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
         [keycloakId, userName, userEmail, 'buyer', false, TRUST_LEVELS.NEW]
       );
-      const token = await createVerificationToken(keycloakId);
-      await sendVerificationEmail(newUser[0], token);
+      const code = await createVerificationCode(keycloakId);
+      await sendVerificationEmail(newUser[0], code);
       return res.status(201).json({ message: 'User created, please verify your email', user: newUser[0] });
     }
 
@@ -246,12 +268,131 @@ app.put('/api/users/me', keycloak.protect(), authPutLimiter, async (req, res) =>
 
 // --- Artist Routes ---
 
+app.post('/api/request-artist', keycloak.protect(), artistUpload, authPostLimiter, async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+  const { files } = req;
+
+  if (!files?.idDocument || !files?.proofOfWork) {
+    return res.status(400).json({ error: 'Missing ID document or proof of work' });
+  }
+
+  try {
+    const { rows: userRows } = await pool.query(
+      'SELECT is_verified FROM users WHERE keycloak_id = $1',
+      [userId]
+    );
+    if (userRows.length === 0 || !userRows[0].is_verified) {
+      return res.status(403).json({ error: 'Must be email-verified to request artist status' });
+    }
+
+    const { rows: existing } = await pool.query(
+      'SELECT status FROM artist_requests WHERE user_id = $1',
+      [userId]
+    );
+    if (existing.length > 0 && existing[0].status === 'pending') {
+      return res.status(409).json({ error: 'Artist request already pending' });
+    }
+    if (existing.length > 0 && existing[0].status === 'approved') {
+      return res.status(409).json({ error: 'Already an artist' });
+    }
+
+    const idPath = path.normalize(files.idDocument[0].path).replace(/^(\.\.(\/|\\|$))+/, '');
+    const proofPath = path.normalize(files.proofOfWork[0].path).replace(/^(\.\.(\/|\\|$))+/, '');
+
+    const { rows } = await pool.query(
+      'INSERT INTO artist_requests (user_id, id_document_path, proof_of_work_path) VALUES ($1, $2, $3) RETURNING request_id',
+      [userId, idPath, proofPath]
+    );
+    res.status(201).json({ message: 'Artist request submitted—awaiting admin review', requestId: rows[0].request_id });
+  } catch (error) {
+    console.error('Artist request error:', error.message);
+    res.status(500).json({ error: 'Failed to submit request', details: error.message });
+  }
+});
+
+app.post('/api/review-artist-request', (req, res, next) => {
+  console.log('Raw Header:', req.headers.authorization);
+  console.log('Decoded Token:', req.kauth?.grant?.access_token?.content);
+  console.log('Roles:', req.kauth?.grant?.access_token?.content?.realm_access); // Fixed!
+  next();
+}, keycloak.protect('realm:admin'), authPostLimiter, async (req, res) => {
+  const adminId = req.kauth.grant.access_token.content.sub;
+  const { requestId, approve, rejectionReason } = req.body;
+
+  if (!requestId || typeof approve !== 'boolean' || (!approve && !rejectionReason)) {
+    return res.status(400).json({ error: 'Missing requestId, approve flag, or rejection reason' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: requestRows } = await client.query(
+      'SELECT user_id, status FROM artist_requests WHERE request_id = $1',
+      [requestId]
+    );
+    if (requestRows.length === 0) {
+      return res.status(404).json({ error: 'Request not found' });
+    }
+    if (requestRows[0].status !== 'pending') {
+      return res.status(409).json({ error: 'Request already reviewed' });
+    }
+    const userId = requestRows[0].user_id;
+
+    const status = approve ? 'approved' : 'rejected';
+    const updateQuery = approve
+      ? 'UPDATE artist_requests SET status = $1, reviewed_at = NOW(), reviewed_by = $2 WHERE request_id = $3'
+      : 'UPDATE artist_requests SET status = $1, reviewed_at = NOW(), reviewed_by = $2, rejection_reason = $4 WHERE request_id = $3';
+    const values = approve
+      ? [status, adminId, requestId]
+      : [status, adminId, requestId, rejectionReason];
+    await client.query(updateQuery, values);
+
+    if (approve) {
+      const adminToken = await axios.post(
+        `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
+        new URLSearchParams({
+          grant_type: 'client_credentials',
+          client_id: process.env.KEYCLOAK_ADMIN_CLIENT_ID,
+          client_secret: process.env.KEYCLOAK_ADMIN_CLIENT_SECRET,
+        }),
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+      );
+
+      await axios.post(
+        `${process.env.KEYCLOAK_URL}/admin/realms/${process.env.KEYCLOAK_REALM}/users/${userId}/role-mappings/realm`,
+        [{ id: 'artist-role-id', name: 'artist' }], // REPLACE WITH YOUR REAL ARTIST ROLE ID FROM KEYCLOAK
+        { headers: { Authorization: `Bearer ${adminToken.data.access_token}`, 'Content-Type': 'application/json' } }
+      );
+
+      await client.query(
+        'UPDATE users SET role = $1 WHERE keycloak_id = $2',
+        ['artist', userId]
+      );
+      await client.query(
+        'INSERT INTO artists (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING',
+        [userId]
+      );
+    }
+
+    await client.query('COMMIT');
+    const message = approve ? 'Artist approved—roles assigned' : `Artist rejected: ${rejectionReason}`;
+    res.json({ message });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Review artist error:', error.message);
+    res.status(500).json({ error: 'Failed to review request', details: error.message });
+  } finally {
+    client.release();
+  }
+});
+
 app.post('/api/artists', keycloak.protect('realm:artist'), authPostLimiter, async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   const { bio, portfolio } = req.body;
   try {
     const { rows } = await pool.query(
-      'INSERT INTO artists (user_id, bio, portfolio) VALUES ($1, $2, $3) RETURNING *',
+      'INSERT INTO artists (user_id, bio, portfolio) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO UPDATE SET bio = $2, portfolio = $3 RETURNING *',
       [userId, bio, portfolio]
     );
     res.status(201).json(rows[0]);
@@ -464,7 +605,7 @@ app.post('/api/orders', keycloak.protect('realm:buyer'), orderLimiter, requireTr
       'INSERT INTO orders (buyer_id, artwork_id, total_amount) VALUES ($1, $2, $3) RETURNING *',
       [userId, artwork_id, total_amount]
     );
-    await updateUserTrustAfterOrder(userId); // From trustService.js
+    await updateUserTrustAfterOrder(userId);
     res.status(201).json(rows[0]);
   } catch (error) {
     res.status(500).json({ error: 'Database error', details: error.message });
@@ -534,7 +675,6 @@ app.get('/api/order-items/:order_id', keycloak.protect(), authGetLimiter, async 
 app.post('/api/payments', keycloak.protect(), authPostLimiter, async (req, res) => {
   const { order_id, amount, payment_method, phone_number } = req.body;
   try {
-    // Input validation
     if (!order_id || !amount || !payment_method) {
       return res.status(400).json({ error: 'Missing required fields: order_id, amount, or payment_method' });
     }
@@ -608,7 +748,6 @@ app.put('/api/payments/:id/status', keycloak.protect('realm:admin'), authPutLimi
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Payment not found' });
 
-    // Proceed only if status is 'completed' to notify artist
     if (status === 'completed') {
       const orderId = rows[0].order_id;
       const { rows: orderRows } = await pool.query(
@@ -627,15 +766,13 @@ app.put('/api/payments/:id/status', keycloak.protect('realm:admin'), authPutLimi
       );
       const artistEmail = userRows[0].email;
 
-      // Email notification
       const emailHtml = `
         <h1>Artwork Sold!</h1>
         <p>Congratulations, your artwork has been sold and payment has been completed. Please fulfill the order.</p>
       `;
       await sendEmail(artistEmail, 'Artwork Sale Completed', emailHtml);
 
-      // In-app message notification
-      const system_user_id = process.env.SYSTEM_USER_ID; // Must be set in .env
+      const system_user_id = process.env.SYSTEM_USER_ID;
       if (!system_user_id) throw new Error('SYSTEM_USER_ID not configured');
       const messageContent = 'Your artwork has been sold and payment is complete. Please fulfill the order.';
       await pool.query(
@@ -650,7 +787,6 @@ app.put('/api/payments/:id/status', keycloak.protect('realm:admin'), authPutLimi
   }
 });
 
-// Confirm payment and notify artist
 app.post('/api/payments/confirm', keycloak.protect(), async (req, res) => {
   const { order_id, transaction_ref } = req.body;
   const client = await pool.connect();
@@ -696,7 +832,6 @@ app.post('/api/payments/confirm', keycloak.protect(), async (req, res) => {
     );
     const buyerEmail = buyerRows[0].email;
 
-    // Notify artist
     const artistEmailHtml = `<h1>Artwork Sold!</h1><p>Your artwork "${artworkTitle}" has been sold and payment is complete. Please fulfill the order.</p>`;
     await sendEmail(artistEmail, 'Artwork Sale Completed', artistEmailHtml);
 
@@ -708,7 +843,6 @@ app.post('/api/payments/confirm', keycloak.protect(), async (req, res) => {
       [system_user_id, artistId, artistMessage]
     );
 
-    // Notify buyer
     const buyerEmailHtml = `<h1>Payment Confirmed</h1><p>Your payment for "${artworkTitle}" is complete. Thank you for your purchase!</p>`;
     await sendEmail(buyerEmail, 'Payment Confirmation', buyerEmailHtml);
 
@@ -759,22 +893,17 @@ app.post('/api/messages', keycloak.protect(), messageLimiter, async (req, res) =
       [userId, receiver_id, content]
     );
     res.status(201).json(rows[0]);
-    await pool.query(
-      'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3)',
-      ['system-user-id', artistId, 'Payment completed for your artwork']
-    );
   } catch (error) {
     res.status(500).json({ error: 'Database error', details: error.message });
   }
 });
 
-//PayPal Callback
+// --- PayPal Callback ---
 
 app.post('/payment-callback', express.json(), async (req, res) => {
   const { payment_status, txn_id, custom } = req.body;
   const client = await pool.connect();
   try {
-    // Basic origin check (expand with PayPal’s official IP list)
     const allowedIps = ['66.211.170.66', '173.0.81.1']; // Example PayPal IPs
     if (!allowedIps.includes(req.ip)) {
       console.warn('Unauthorized callback attempt from IP:', req.ip);
@@ -824,7 +953,6 @@ app.post('/payment-callback', express.json(), async (req, res) => {
       await client.query('COMMIT');
 
       console.log('Payment completed and artist notified for order:', orderId);
-      await updateUserTrustAfterOrder(buyerId);
     }
     res.status(200).json({ status: 'Processed' });
   } catch (error) {
