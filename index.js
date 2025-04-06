@@ -34,7 +34,7 @@ app.use('/api-docs', swaggerUI.serve, swaggerUI.setup(swaggerData));
 app.use(express.json());
 app.use(cors());
 app.use(bodyParser.json());
-app.use(keycloak.middleware());
+//app.use(keycloak.middleware());
 
 // Multer setup for general uploads (artworks)
 const storage = multer.diskStorage({

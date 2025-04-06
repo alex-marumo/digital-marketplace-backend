@@ -18,7 +18,7 @@ const sessionStore = new PostgreSqlStore({
 // Configure Keycloak with the store
 const keycloak = new Keycloak({}, {
   'realm': 'digital-marketplace',
-  'auth-server-url': 'http://localhost:8080/', // Was /auth?
+  'auth-server-url': 'http://localhost:8080', // Was /auth?
   'resource': 'digital-marketplace-backend',
   'bearer-only': true,
   'clientId': 'digital-marketplace-backend',
