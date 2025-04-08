@@ -17,12 +17,12 @@ const sessionStore = new PostgreSqlStore({
 
 // Configure Keycloak with the store
 const keycloak = new Keycloak({}, {
-  'realm': 'digital-marketplace',
-  'auth-server-url': 'http://localhost:8080', // Was /auth?
-  'resource': 'digital-marketplace-backend',
-  'bearer-only': true,
-  'clientId': 'digital-marketplace-backend',
-  'secret': process.env.KEYCLOAK_CLIENT_SECRET
+  realm: process.env.KEYCLOAK_REALM,
+  "auth-server-url": process.env.KEYCLOAK_URL,
+  "ssl-required": "none",
+  resource: process.env.KEYCLOAK_CLIENT_ID,
+  "confidential-port": 0,
+  "client-secret": process.env.KEYCLOAK_CLIENT_SECRET,
 });
 
 keycloak.debug = true;

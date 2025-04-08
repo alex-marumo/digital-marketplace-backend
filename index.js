@@ -1,3 +1,10 @@
+console.log('Keycloak Config:', {
+  url: process.env.KEYCLOAK_URL,
+  realm: process.env.KEYCLOAK_REALM,
+  clientId: process.env.KEYCLOAK_CLIENT_ID,
+  secret: process.env.KEYCLOAK_CLIENT_SECRET ? '****' : 'MISSING'
+});
+
 require('dotenv').config();
 console.log('DATABASE_URL:', process.env.DATABASE_URL);
 const express = require('express');
@@ -5,7 +12,7 @@ const bodyParser = require('body-parser');
 const multer = require('multer');
 const path = require('path');
 const cors = require('cors');
-const { keycloak } = require('./keycloak');
+const { keycloak, sessionStore } = require('./keycloak');
 const axios = require('axios');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
@@ -15,6 +22,7 @@ const { pool } = require('./db');
 const { sendVerificationEmail } = require('./services/emailService');
 const { createVerificationCode, verifyCode } = require('./services/verificationService');
 const { verifyRecaptcha } = require('./services/recaptchaService');
+const session = require('express-session');
 
 const { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter } = require('./middleware/rateLimiter');
 console.log('Rate Limiters:', { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter });
@@ -28,13 +36,26 @@ const swaggerData = JSON.parse(fs.readFileSync(swaggerFile, 'utf8'));
 
 const app = express();
 const port = process.env.PORT || 3000;
+app.set('trust proxy', 1);
 
 // Middleware setup
 app.use('/api-docs', swaggerUI.serve, swaggerUI.setup(swaggerData));
 app.use(express.json());
 app.use(cors());
+app.use(cors({ origin: "http://localhost:3001" }));
 app.use(bodyParser.json());
-//app.use(keycloak.middleware());
+app.use(keycloak.middleware());
+
+// index.js, after middleware setup
+app.use(
+  session({
+    store: sessionStore,
+    secret: process.env.SESSION_SECRET || "your-secret-here",
+    resave: false,
+    saveUninitialized: false,
+  })
+);
+app.use(keycloak.middleware());
 
 // Multer setup for general uploads (artworks)
 const storage = multer.diskStorage({
@@ -74,6 +95,7 @@ const artistUpload = multer({
 // --- User Routes ---
 
 app.post('/api/pre-register', registrationLimiter, async (req, res) => {
+  console.log('Pre-register hit:', req.body);
   const { recaptchaToken, email, name, password } = req.body;
   if (!recaptchaToken || !email || !name || !password) {
     return res.status(400).json({ error: 'Missing required fields' });
@@ -97,8 +119,8 @@ app.post('/api/pre-register', registrationLimiter, async (req, res) => {
       `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
       new URLSearchParams({
         grant_type: 'client_credentials',
-        client_id: process.env.KEYCLOAK_ADMIN_CLIENT_ID,
-        client_secret: process.env.KEYCLOAK_ADMIN_CLIENT_SECRET,
+        client_id: process.env.KEYCLOAK_CLIENT_ID,
+        client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
       }),
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
     );
@@ -157,8 +179,8 @@ app.post('/api/verify-email-code', registrationLimiter, async (req, res) => {
       `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
       new URLSearchParams({
         grant_type: 'client_credentials',
-        client_id: process.env.KEYCLOAK_ADMIN_CLIENT_ID,
-        client_secret: process.env.KEYCLOAK_ADMIN_CLIENT_SECRET,
+        client_id: process.env.KEYCLOAK_CLIENT_ID,
+        client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
       }),
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
     );
@@ -353,8 +375,8 @@ app.post('/api/review-artist-request', (req, res, next) => {
         `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
         new URLSearchParams({
           grant_type: 'client_credentials',
-          client_id: process.env.KEYCLOAK_ADMIN_CLIENT_ID,
-          client_secret: process.env.KEYCLOAK_ADMIN_CLIENT_SECRET,
+          client_id: process.env.KEYCLOAK_CLIENT_ID,
+          client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
         }),
         { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
       );
