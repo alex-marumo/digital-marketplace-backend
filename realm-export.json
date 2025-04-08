@@ -1,0 +1,100 @@
+{
+    "realm": "digital-marketplace",
+    "enabled": true,
+    "sslRequired": "none",
+    "registrationAllowed": true,
+    "loginTheme": "keycloak",
+    "users": [
+      {
+        "username": "testuser",
+        "enabled": true,
+        "email": "testuser@example.com",
+        "firstName": "Test",
+        "lastName": "User",
+        "credentials": [
+          {
+            "type": "password",
+            "value": "password123",
+            "temporary": false
+          }
+        ],
+        "realmRoles": ["buyer"]
+      }
+    ],
+    "roles": {
+      "realm": [
+        {
+          "name": "admin",
+          "description": "Full admin access"
+        },
+        {
+          "name": "artist",
+          "description": "Can create and sell items"
+        },
+        {
+          "name": "buyer",
+          "description": "Can browse and buy items"
+        }
+      ]
+    },
+    "clients": [
+      {
+        "clientId": "digital-marketplace-frontend",
+        "enabled": true,
+        "publicClient": true,
+        "directAccessGrantsEnabled": true,
+        "redirectUris": ["http://localhost:3001/*"],  
+        "webOrigins": ["http://localhost:3001"],      
+        "protocol": "openid-connect",
+        "attributes": {
+          "pkce.code.challenge.method": "S256"
+        }
+      },
+      {
+        "clientId": "digital-marketplace-backend",
+        "enabled": true,
+        "publicClient": false,
+        "secret": "QXfLjbVTK2QqGkO4dQxMjlmPUloQytZt",
+        "serviceAccountsEnabled": true,
+        "bearerOnly": true,
+        "protocol": "openid-connect"
+      }
+    ],
+    "clientScopes": [
+      {
+        "name": "backend-audience",
+        "protocol": "openid-connect",
+        "attributes": {
+          "include.in.token.scope": "true",
+          "display.on.consent.screen": "false"
+        },
+        "protocolMappers": [
+          {
+            "name": "audience-mapper",
+            "protocol": "openid-connect",
+            "protocolMapper": "oidc-audience-mapper",
+            "consentRequired": false,
+            "config": {
+              "included.client.audience": "digital-marketplace-backend",
+              "id.token.claim": "true",
+              "access.token.claim": "true"
+            }
+          }
+        ]
+      }
+    ],
+    "scopeMappings": [
+      {
+        "client": "digital-marketplace-frontend",
+        "roles": ["admin", "artist", "buyer"]
+      }
+    ],
+    "clientScopeMappings": {
+      "digital-marketplace-frontend": [
+        {
+          "clientScope": "backend-audience",
+          "roles": ["admin", "artist", "buyer"]
+        }
+      ]
+    }
+  }
