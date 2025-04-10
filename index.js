@@ -25,7 +25,14 @@ const { verifyRecaptcha } = require('./services/recaptchaService');
 
 const { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter } = require('./middleware/rateLimiter');
 console.log('Rate Limiters:', { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter });
-console.log('SYSTEM_USER_ID:', process.env.SYSTEM_USER_ID);
+if (process.env.NODE_ENV === 'development') {
+  console.debug('Keycloak Config:', {
+    url: process.env.KEYCLOAK_URL,
+    realm: process.env.KEYCLOAK_REALM,
+    clientId: process.env.KEYCLOAK_CLIENT_ID,
+    secret: process.env.KEYCLOAK_CLIENT_SECRET ? '****' : 'MISSING'
+  });
+}
 
 const { requireTrustLevel } = require('./middleware/trustLevel');
 const { TRUST_LEVELS, updateTrustLevel, updateUserTrustAfterOrder } = require('./services/trustService');
@@ -49,7 +56,7 @@ app.use(session({
   secret: process.env.SESSION_SECRET || "your-secret-here",
   resave: false,
   saveUninitialized: false,
-  cookie: { secure: false } // Set to true if HTTPS
+  cookie: { secure: process.env.NODE_ENV === 'production' } // Set to true if HTTPS
 }));
 app.use((req, res, next) => {
   console.log('Session exists pre-Keycloak:', !!req.session);
@@ -875,7 +882,7 @@ app.put('/api/payments/:id/status', keycloak.protect('realm:admin'), authPutLimi
   }
 });
 
-app.post('/api/payments/confirm', keycloak.protect(), async (req, res) => {
+app.post('/api/payments/confirm', keycloak.protect(), authPostLimiter, async (req, res) => {
   const { order_id, transaction_ref } = req.body;
   const client = await pool.connect();
   try {
@@ -988,7 +995,7 @@ app.post('/api/messages', keycloak.protect(), messageLimiter, async (req, res) =
 
 // --- PayPal Callback ---
 
-app.post('/payment-callback', express.json(), async (req, res) => {
+app.post('/payment-callback', express.json(), authPostLimiter, async (req, res) => {
   const { payment_status, txn_id, custom } = req.body;
   const client = await pool.connect();
   try {
