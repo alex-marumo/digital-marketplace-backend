@@ -1,3 +1,10 @@
+console.log('Keycloak Config:', {
+  url: process.env.KEYCLOAK_URL,
+  realm: process.env.KEYCLOAK_REALM,
+  clientId: process.env.KEYCLOAK_CLIENT_ID,
+  secret: process.env.KEYCLOAK_CLIENT_SECRET ? '****' : 'MISSING'
+});
+
 require('dotenv').config();
 console.log('Keycloak Config:', {
   url: process.env.KEYCLOAK_URL,
@@ -22,6 +29,7 @@ const { pool } = require('./db');
 const { sendVerificationEmail } = require('./services/emailService');
 const { createVerificationCode, verifyCode } = require('./services/verificationService');
 const { verifyRecaptcha } = require('./services/recaptchaService');
+const session = require('express-session');
 
 const { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter } = require('./middleware/rateLimiter');
 console.log('Rate Limiters:', { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter });
@@ -43,7 +51,9 @@ const swaggerData = JSON.parse(fs.readFileSync(swaggerFile, 'utf8'));
 const app = express();
 const port = process.env.PORT || 3000;
 app.set('trust proxy', 1);
+app.set('trust proxy', 1);
 
+// Middleware setup
 // Middleware setup
 app.use('/api-docs', swaggerUI.serve, swaggerUI.setup(swaggerData));
 app.use(express.json());
@@ -108,9 +118,36 @@ const artistUpload = multer({
   { name: 'proofOfWork', maxCount: 1 },
 ]);
 
+// Multer setup for artist verification
+const artistStorage = multer.diskStorage({
+  destination: './uploads/artist_verification/',
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (!['.pdf', '.jpg', '.jpeg', '.png'].includes(ext)) {
+      return cb(new Error('Invalid file type—only PDF, JPG, PNG allowed'));
+    }
+    cb(null, `${req.kauth.grant.access_token.content.sub}-${Date.now()}${ext}`);
+  },
+});
+const artistUpload = multer({
+  storage: artistStorage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (!['.pdf', '.jpg', '.jpeg', '.png'].includes(ext)) {
+      return cb(new Error('Invalid file type'));
+    }
+    cb(null, true);
+  },
+}).fields([
+  { name: 'idDocument', maxCount: 1 },
+  { name: 'proofOfWork', maxCount: 1 },
+]);
+
 // --- User Routes ---
 
 app.post('/api/pre-register', registrationLimiter, async (req, res) => {
+  console.log('Pre-register hit:', req.body);
   console.log('Pre-register hit:', req.body);
   const { recaptchaToken, email, name, password } = req.body;
   if (!recaptchaToken || !email || !name || !password) {
@@ -137,6 +174,8 @@ app.post('/api/pre-register', registrationLimiter, async (req, res) => {
       `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
       new URLSearchParams({
         grant_type: 'client_credentials',
+        client_id: process.env.KEYCLOAK_CLIENT_ID,
+        client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
         client_id: process.env.KEYCLOAK_CLIENT_ID,
         client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
       }),
@@ -224,6 +263,8 @@ app.post('/api/verify-email-code', registrationLimiter, async (req, res) => {
       `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
       new URLSearchParams({
         grant_type: 'client_credentials',
+        client_id: process.env.KEYCLOAK_CLIENT_ID,
+        client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
         client_id: process.env.KEYCLOAK_CLIENT_ID,
         client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
       }),
@@ -367,6 +408,8 @@ app.get('/api/users/me', keycloak.protect(), authGetLimiter, async (req, res) =>
       );
       const code = await createVerificationCode(keycloakId);
       await sendVerificationEmail(newUser[0], code);
+      const code = await createVerificationCode(keycloakId);
+      await sendVerificationEmail(newUser[0], code);
       return res.status(201).json({ message: 'User created, please verify your email', user: newUser[0] });
     }
 
@@ -487,6 +530,7 @@ app.post('/api/artists', keycloak.protect('realm:artist'), authPostLimiter, asyn
   const { bio, portfolio } = req.body;
   try {
     const { rows } = await pool.query(
+      'INSERT INTO artists (user_id, bio, portfolio) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO UPDATE SET bio = $2, portfolio = $3 RETURNING *',
       'INSERT INTO artists (user_id, bio, portfolio) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO UPDATE SET bio = $2, portfolio = $3 RETURNING *',
       [userId, bio, portfolio]
     );
@@ -701,6 +745,7 @@ app.post('/api/orders', keycloak.protect('realm:buyer'), orderLimiter, requireTr
       [userId, artwork_id, total_amount]
     );
     await updateUserTrustAfterOrder(userId);
+    await updateUserTrustAfterOrder(userId);
     res.status(201).json(rows[0]);
   } catch (error) {
     res.status(500).json({ error: 'Database error', details: error.message });
@@ -868,6 +913,7 @@ app.put('/api/payments/:id/status', keycloak.protect('realm:admin'), authPutLimi
       await sendEmail(artistEmail, 'Artwork Sale Completed', emailHtml);
 
       const system_user_id = process.env.SYSTEM_USER_ID;
+      const system_user_id = process.env.SYSTEM_USER_ID;
       if (!system_user_id) throw new Error('SYSTEM_USER_ID not configured');
       const messageContent = 'Your artwork has been sold and payment is complete. Please fulfill the order.';
       await pool.query(
@@ -993,6 +1039,7 @@ app.post('/api/messages', keycloak.protect(), messageLimiter, async (req, res) =
   }
 });
 
+// --- PayPal Callback ---
 // --- PayPal Callback ---
 
 app.post('/payment-callback', express.json(), publicDataLimiter, authPostLimiter, messageLimiter, async (req, res) => {
