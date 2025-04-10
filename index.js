@@ -255,7 +255,7 @@ app.post('/api/verify-email-code', registrationLimiter, async (req, res) => {
   }
 });
 
-app.post('/api/select-role', keycloak.protect(), async (req, res) => {
+app.post('/api/select-role', keycloak.protect(), authPostLimiter, async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   const { role } = req.body;
   if (!['buyer', 'artist'].includes(role)) {
@@ -315,7 +315,7 @@ app.post('/api/select-role', keycloak.protect(), async (req, res) => {
   }
 });
 
-app.post('/api/upload-artist-docs', keycloak.protect(), artistUpload, async (req, res) => {
+app.post('/api/upload-artist-docs', keycloak.protect(), artistUpload, authPostLimiter, async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   const { files } = req;
   if (!files?.proofOfWork) {
@@ -882,7 +882,7 @@ app.put('/api/payments/:id/status', keycloak.protect('realm:admin'), authPutLimi
   }
 });
 
-app.post('/api/payments/confirm', keycloak.protect(), authPostLimiter, async (req, res) => {
+app.post('/api/payments/confirm', keycloak.protect(), authPostLimiter, orderLimiter, async (req, res) => {
   const { order_id, transaction_ref } = req.body;
   const client = await pool.connect();
   try {
@@ -995,7 +995,7 @@ app.post('/api/messages', keycloak.protect(), messageLimiter, async (req, res) =
 
 // --- PayPal Callback ---
 
-app.post('/payment-callback', express.json(), authPostLimiter, async (req, res) => {
+app.post('/payment-callback', express.json(), publicDataLimiter, authPostLimiter, messageLimiter, async (req, res) => {
   const { payment_status, txn_id, custom } = req.body;
   const client = await pool.connect();
   try {
