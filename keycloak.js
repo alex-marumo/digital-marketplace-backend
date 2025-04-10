@@ -2,28 +2,32 @@ const session = require('express-session');
 const PostgreSqlStore = require('connect-pg-simple')(session);
 const { Pool } = require('pg');
 const Keycloak = require('keycloak-connect');
-require('dotenv').config(); // Load .env vars right here
+require('dotenv').config();
 
-// Connect to PostgreSQL
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
 });
 
-// Set up the session store
 const sessionStore = new PostgreSqlStore({
   pool: pool,
   tableName: 'sessions'
 });
 
-// Configure Keycloak with the store
-const keycloak = new Keycloak({}, {
+console.log('Session store initialized:', sessionStore);
+
+const keycloak = new Keycloak({
+  store: sessionStore // Use Postgres store here
+}, {
   realm: process.env.KEYCLOAK_REALM,
-  "auth-server-url": process.env.KEYCLOAK_URL,
-  "ssl-required": "none", // Fine for local dev, change to "external" for prod if needed
+  'auth-server-url': process.env.KEYCLOAK_URL,
+  'ssl-required': 'external',
   resource: process.env.KEYCLOAK_CLIENT_ID,
-  "confidential-port": 0,
-  "client-secret": process.env.KEYCLOAK_CLIENT_SECRET,
+  credentials: {
+    secret: process.env.KEYCLOAK_CLIENT_SECRET
+  },
+  'confidential-port': 0,
+  'policy-enforcer': {}
 });
 
 keycloak.debug = true;
