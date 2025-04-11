@@ -318,15 +318,107 @@ app.post('/api/select-role', keycloak.protect(), authPostLimiter, async (req, re
 app.post('/api/upload-artist-docs', keycloak.protect(), artistUpload, authPostLimiter, async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   const { files } = req;
-  if (!files?.proofOfWork) {
-    return res.status(400).json({ error: 'Upload a portfolio file' });
+
+  if (!files?.idDocument || !files?.proofOfWork) {
+    return res.status(400).json({ error: 'ID document and portfolio are required' });
   }
-  const proofPath = files.proofOfWork[0].path;
-  await pool.query(
-    'INSERT INTO artist_requests (user_id, proof_of_work_path, status) VALUES ($1, $2, $3)',
-    [userId, proofPath, 'pending']
-  );
-  res.json({ message: 'Portfolio uploaded, wait for approval' });
+
+  try {
+    // Hash ID document metadata (e.g., assume ID has extractable text or filename as proxy)
+    const idPath = files.idDocument[0].path;
+    const idHash = crypto.createHash('sha256').update(idPath).digest('hex'); // Hash file path or extractable data
+    const proofPath = files.proofOfWork[0].path;
+    const selfiePath = files.selfie?.[0]?.path || null;
+
+    // Insert into artist_requests
+    const { rows } = await pool.query(
+      'INSERT INTO artist_requests (user_id, id_hash, proof_of_work_path, selfie_path, status) VALUES ($1, $2, $3, $4, $5) RETURNING request_id',
+      [userId, idHash, proofPath, selfiePath, 'pending']
+    );
+    const requestId = rows[0].request_id;
+
+    // Notify admin (email or system message)
+    const adminEmail = process.env.ADMIN_EMAIL || 'admin@example.com';
+    const emailHtml = `
+      <h1>New Artist Request</h1>
+      <p>User ${userId} submitted an artist request (ID: ${requestId}). Review ID hash: ${idHash}, portfolio: ${proofPath}.</p>
+    `;
+    await sendEmail(adminEmail, 'New Artist Verification Request', emailHtml);
+
+    res.json({ message: 'Documents uploaded—awaiting admin approval', requestId });
+  } catch (error) {
+    console.error('Upload error:', error.message);
+    res.status(500).json({ error: 'Upload failed', details: error.message });
+  }
+});
+
+app.post('/api/review-artist-request', keycloak.protect('realm:admin'), authPostLimiter, async (req, res) => {
+  const { requestId, approve } = req.body;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      'SELECT user_id, id_hash, proof_of_work_path FROM artist_requests WHERE request_id = $1 AND status = $2',
+      [requestId, 'pending']
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Request not found or already reviewed' });
+    }
+    const { user_id: userId, id_hash, proof_of_work_path } = rows[0];
+
+    await client.query(
+      'UPDATE artist_requests SET status = $1 WHERE request_id = $2',
+      [approve ? 'approved' : 'rejected', requestId]
+    );
+
+    if (approve) {
+      // Update DB
+      await client.query(
+        'UPDATE users SET role = $1, status = $2 WHERE keycloak_id = $3',
+        ['artist', 'verified', userId]
+      );
+
+      // Sync Keycloak
+      const adminTokenResponse = await axios.post(
+        `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
+        new URLSearchParams({
+          grant_type: 'client_credentials',
+          client_id: process.env.KEYCLOAK_CLIENT_ID,
+          client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
+        }),
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+      );
+      const adminToken = adminTokenResponse.data.access_token;
+
+      const rolesResponse = await axios.get(
+        `${process.env.KEYCLOAK_URL}/admin/realms/${process.env.KEYCLOAK_REALM}/roles`,
+        { headers: { Authorization: `Bearer ${adminToken}` } }
+      );
+      const artistRole = rolesResponse.data.find(r => r.name === 'artist');
+      if (!artistRole) throw new Error('Artist role not found in Keycloak');
+
+      await axios.post(
+        `${process.env.KEYCLOAK_URL}/admin/realms/${process.env.KEYCLOAK_REALM}/users/${userId}/role-mappings/realm`,
+        [{ id: artistRole.id, name: artistRole.name }],
+        {
+          headers: {
+            Authorization: `Bearer ${adminToken}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+      console.log(`Assigned artist role to ${userId}`);
+    }
+
+    await client.query('COMMIT');
+    res.json({ message: approve ? 'Artist approved' : 'Artist rejected' });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Review error:', error.message);
+    res.status(500).json({ error: 'Review failed', details: error.message });
+  } finally {
+    client.release();
+  }
 });
 
 app.post('/api/resend-verification-code', registrationLimiter, async (req, res) => {
@@ -353,6 +445,7 @@ app.post('/api/resend-verification-code', registrationLimiter, async (req, res) 
 app.get('/api/users/me', keycloak.protect(), authGetLimiter, async (req, res) => {
   try {
     const keycloakId = req.kauth.grant.access_token.content.sub;
+    const emailVerified = req.kauth.grant.access_token.content.email_verified || false;
     const { rows } = await pool.query(
       'SELECT user_id, name, email, role, is_verified, trust_level, status FROM users WHERE keycloak_id = $1',
       [keycloakId]
@@ -362,17 +455,30 @@ app.get('/api/users/me', keycloak.protect(), authGetLimiter, async (req, res) =>
       const userName = req.kauth.grant.access_token.content.name || 'Unknown';
       const userEmail = req.kauth.grant.access_token.content.email || 'unknown@example.com';
       const { rows: newUser } = await pool.query(
-        'INSERT INTO users (keycloak_id, name, email, role, is_verified, trust_level) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-        [keycloakId, userName, userEmail, 'buyer', false, TRUST_LEVELS.NEW]
+        'INSERT INTO users (keycloak_id, name, email, role, is_verified, trust_level, status) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+        [keycloakId, userName, userEmail, 'buyer', emailVerified, TRUST_LEVELS.NEW, emailVerified ? 'pending_role_selection' : 'pending_email_verification']
       );
-      const code = await createVerificationCode(keycloakId);
-      await sendVerificationEmail(newUser[0], code);
-      return res.status(201).json({ message: 'User created, please verify your email', user: newUser[0] });
+      if (!emailVerified) {
+        const code = await createVerificationCode(keycloakId);
+        await sendVerificationEmail(newUser[0], code);
+      }
+      return res.status(201).json({ message: emailVerified ? 'User synced' : 'User created, please verify your email', user: newUser[0] });
     }
 
-    // Remove the 403 block—let client handle unverified state
+    // Sync is_verified with Keycloak
+    if (rows[0].is_verified !== emailVerified) {
+      const { rows: updated } = await pool.query(
+        'UPDATE users SET is_verified = $1 WHERE keycloak_id = $2 RETURNING *',
+        [emailVerified, keycloakId]
+      );
+      console.log(`Synced is_verified for ${keycloakId}: ${emailVerified}`);
+      return res.json(updated[0]);
+    }
+
+    console.log('User fetched:', rows[0]); // Debug log
     res.json(rows[0]);
   } catch (error) {
+    console.error('User fetch error:', error.message);
     res.status(500).json({ error: 'Database error', details: error.message });
   }
 });
