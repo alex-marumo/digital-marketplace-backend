@@ -352,30 +352,104 @@ app.post('/api/upload-artist-docs', keycloak.protect(), artistUpload, authPostLi
   }
 });
 
-app.post('/api/review-artist-request', keycloak.protect('realm:admin'), authPostLimiter, async (req, res) => {
-  const { requestId, approve } = req.body;
+// List all pending artist requests
+app.get('/api/admin/artist-requests/pending', keycloak.protect('realm:admin'), authGetLimiter, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT ar.request_id, ar.user_id, ar.id_document_path, ar.proof_of_work_path, ar.selfie_path,
+              ar.requested_at, u.email, u.name
+       FROM artist_requests ar
+       JOIN users u ON ar.user_id = u.keycloak_id
+       WHERE ar.status = 'pending'
+       ORDER BY ar.requested_at ASC`
+    );
+    console.log('Pending artist requests:', rows.length);
+    res.json(rows);
+  } catch (error) {
+    console.error('Error fetching requests:', error.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Stream document file
+app.get('/api/admin/artist-requests/:requestId/file/:type', keycloak.protect('realm:admin'), authGetLimiter, async (req, res) => {
+  try {
+    const { requestId, type } = req.params;
+    const validTypes = ['id_document', 'proof_of_work', 'selfie'];
+    if (!validTypes.includes(type)) {
+      return res.status(400).json({ error: 'Invalid document type' });
+    }
+    const column = type === 'id_document' ? 'id_document_path' :
+                   type === 'proof_of_work' ? 'proof_of_work_path' : 'selfie_path';
+    
+    const { rows } = await pool.query(
+      `SELECT ${column} AS file_path FROM artist_requests WHERE request_id = $1 AND status = $2`,
+      [requestId, 'pending']
+    );
+    if (!rows.length || !rows[0].file_path) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+    const filePath = path.resolve(rows[0].file_path);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'File missing' });
+    }
+    const ext = path.extname(filePath).toLowerCase();
+    const contentType = {
+      '.pdf': 'application/pdf',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png'
+    }[ext] || 'application/octet-stream';
+    res.setHeader('Content-Type', contentType);
+    fs.createReadStream(filePath).pipe(res);
+  } catch (error) {
+    console.error('Error streaming document:', error.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Review artist request
+app.post('/api/admin/artist-requests/:requestId/review', keycloak.protect('realm:admin'), authPostLimiter, async (req, res) => {
+  const { requestId } = req.params;
+  const { status, rejection_reason } = req.body;
+  const reviewerId = req.kauth.grant.access_token.content.sub;
+
+  if (!['approved', 'rejected'].includes(status)) {
+    return res.status(400).json({ error: 'Invalid status' });
+  }
+  if (status === 'rejected' && !rejection_reason) {
+    return res.status(400).json({ error: 'Rejection reason required' });
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
-      'SELECT user_id, id_hash, proof_of_work_path FROM artist_requests WHERE request_id = $1 AND status = $2',
+      'SELECT user_id, id_document_path, proof_of_work_path, selfie_path FROM artist_requests WHERE request_id = $1 AND status = $2',
       [requestId, 'pending']
     );
-    if (rows.length === 0) {
+    if (!rows.length) {
       return res.status(404).json({ error: 'Request not found or already reviewed' });
     }
-    const { user_id: userId, id_hash, proof_of_work_path } = rows[0];
+    const { user_id: userId } = rows[0];
 
     await client.query(
-      'UPDATE artist_requests SET status = $1 WHERE request_id = $2',
-      [approve ? 'approved' : 'rejected', requestId]
+      'UPDATE artist_requests SET status = $1, rejection_reason = $2, reviewed_by = $3, reviewed_at = CURRENT_TIMESTAMP WHERE request_id = $4',
+      [status, rejection_reason || null, reviewerId, requestId]
     );
 
-    if (approve) {
-      // Update DB
-      await client.query(
-        'UPDATE users SET role = $1, status = $2 WHERE keycloak_id = $3',
+    if (status === 'approved') {
+      // Update user
+      const { rows: userRows } = await client.query(
+        'UPDATE users SET role = $1, status = $2 WHERE keycloak_id = $3 RETURNING user_id',
         ['artist', 'verified', userId]
+      );
+      const dbUserId = userRows[0].user_id;
+
+      // Insert into artists table
+      await client.query(
+        'INSERT INTO artists (user_id, bio, portfolio) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO NOTHING',
+        [dbUserId, '', '']
       );
 
       // Sync Keycloak
@@ -407,11 +481,18 @@ app.post('/api/review-artist-request', keycloak.protect('realm:admin'), authPost
           },
         }
       );
-      console.log(`Assigned artist role to ${userId}`);
     }
 
+    // Notify artist
+    const { rows: userRows } = await client.query('SELECT email, name FROM users WHERE keycloak_id = $1', [userId]);
+    const emailHtml = status === 'approved'
+      ? `<h1>Artist Verification Approved!</h1><p>Congratulations, ${userRows[0].name}! You’re now an approved artist. Start uploading your artworks!</p>`
+      : `<h1>Artist Verification Rejected</h1><p>Sorry, ${userRows[0].name}. Your request was rejected. Reason: ${rejection_reason}. Please resubmit or contact support.</p>`;
+    await sendEmail(userRows[0].email, `Artist Verification ${status.charAt(0).toUpperCase() + status.slice(1)}`, emailHtml);
+
     await client.query('COMMIT');
-    res.json({ message: approve ? 'Artist approved' : 'Artist rejected' });
+    console.log(`Request ${requestId} ${status} by ${reviewerId}`);
+    res.json({ message: `Request ${status}` });
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Review error:', error.message);

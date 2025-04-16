@@ -1,4 +1,3 @@
----
 
 # **Digital Marketplace Backend**
 
@@ -11,11 +10,12 @@ Welcome to the **Digital Marketplace Backend**—the gritty engine powering a pl
   - Auto user creation via Keycloak on signup—email/password baked in.
   - Email verification with 6-digit codes (expires in 1 hour, because Gmail’s a slacker).
   - reCAPTCHA to keep the bots at bay.
-  - Roles: **Buyers** shop, **Artists** create, **Admins** rule.
+  - Roles: **Buyers** shop, **Artists** create (after admin approval), **Admins** rule.
 
 - **Artist & Artwork Management**
   - Artists craft profiles and drop artworks with multi-image uploads.
   - Edit or trash your creations—full control, no mercy.
+  - Admin-reviewed artist verification with document uploads (ID and portfolio).
 
 - **Order & Checkout System**
   - Buyers order up, track their loot, and dig into order details.
@@ -37,26 +37,34 @@ Welcome to the **Digital Marketplace Backend**—the gritty engine powering a pl
   - Email verification + reCAPTCHA = no fake accounts.
   - Audit logs for when shit hits the fan.
 
+- **Admin Panel**
+  - Admins review artist requests, manage orders, and tweak categories.
+
 ## **🛠 Tech Stack**
 - **Backend**: Node.js, Express.js
-- **Database**: PostgreSQL (with `users`, `artworks`, and more)
+- **Database**: PostgreSQL (with `users`, `artworks`, `artist_requests`, and more)
 - **Auth**: Keycloak (JWTs, roles, and all that jazz)
 - **Email**: Nodemailer (Gmail SMTP, because it’s free and slow)
 - **Anti-Bot**: Google reCAPTCHA
 - **File Storage**: Local uploads (paths in DB—keep it simple)
+- **API Docs**: Swagger UI (`/api-docs`)
 
 ## **🏛️ Architecture & Business Rules**
 
 - **Keycloak Integration**  
-  Keycloak runs the show—users register via API, verify emails, then grab tokens with `grant_type=password`. Protected endpoints (`/api/users/me`, etc.) demand a valid JWT with `keycloak.protect()`. Roles (`buyer`, `artist`, `admin`) gatekeep access.
+  Keycloak runs the show—users register via `/api/pre-register`, verify emails, then grab tokens with `grant_type=password`. Protected endpoints (`/api/users/me`, etc.) demand a valid JWT with `keycloak.protect()`. Roles (`buyer`, `artist`, `admin`) gatekeep access.
 
 - **Email Verification**  
   Newbies get a 6-digit code emailed post-signup—verify it to flip `is_verified` to `true` and unlock the good stuff. Codes last 1 hour (extended from 10 mins—Gmail delays suck).
 
 - **Role-Based Access Control (RBAC)**  
   - **Buyers**: Order, review, message.
-  - **Artists**: Manage profiles/artworks, cash in on sales.
-  - **Admins**: Oversee orders, payments, categories.
+  - **Artists**: Manage profiles/artworks, cash in on sales (after admin approval).
+  - **Admins**: Oversee orders, payments, categories, and artist requests.
+
+- **Artist Verification**  
+  - Users apply via `/api/upload-artist-docs`, uploading ID and portfolio.
+  - Admins review via `/api/admin/artist-requests/:requestId/review`. Approval sets `role = artist`; rejection keeps `buyer`.
 
 - **Data Integrity**  
   Foreign keys tie `users` to `artworks`, `orders`, and `payments`. Multi-image support via `artwork_images`.
@@ -87,17 +95,22 @@ KEYCLOAK_REALM=digital-marketplace
 KEYCLOAK_ADMIN_CLIENT_ID=admin-cli
 KEYCLOAK_ADMIN_CLIENT_SECRET=your-admin-secret
 KEYCLOAK_CLIENT_ID=digital-marketplace-backend
-KEYCLOAK_CLIENT_SECRET=your-app-secret  # Omit if public client
+KEYCLOAK_CLIENT_SECRET=your-app-secret
 RECAPTCHA_SECRET_KEY=your-recaptcha-secret
 EMAIL_USER=your-gmail@gmail.com
 EMAIL_PASSWORD=your-app-password
 EMAIL_FROM=your-gmail@gmail.com
 SYSTEM_USER_ID=your-system-user-uuid
+ADMIN_EMAIL=admin@example.com
 PORT=3000
+PAYPAL_CLIENT_ID=your-paypal-client-id
+PAYPAL_SECRET=your-paypal-secret
+APP_URL=http://localhost:3000
 ```
 
-- **Keycloak**: Set up a realm (`digital-marketplace`), admin client (`admin-cli`), and app client (`digital-marketplace-backend`—public or confidential).
+- **Keycloak**: Set up a realm (`digital-marketplace`), admin client (`admin-cli`), and app client (`digital-marketplace-backend`—confidential).
 - **Email**: Use Gmail with an App Password (2FA on).
+- **PayPal**: Sandbox credentials for testing.
 
 ### **4️⃣ Run DB Migrations**
 Spin up PostgreSQL, then:
@@ -126,27 +139,35 @@ Hits `http://localhost:3000`. Swagger UI at `/api-docs`.
   Update your name/email.
 
 ### **Artist Management**
+- **`POST /api/upload-artist-docs`** *(protected)*  
+  Submit ID and portfolio for artist verification.
+- **`GET /api/admin/artist-requests/pending`** *(admin)*  
+  List pending artist requests.
+- **`GET /api/admin/artist-requests/:requestId/file/:type`** *(admin)*  
+  Stream verification documents.
+- **`POST /api/admin/artist-requests/:requestId/review`** *(admin)*  
+  Approve/reject artist requests.
 - **`POST /api/artists`** *(artist)*  
   Create your artist profile.
 - **`GET /api/artists`**  
   List all artists.
-- **`GET /api/artists/{id}`**  
+- **`GET /api/artists/:id`**  
   Peek at an artist.
-- **`PUT /api/artists/{id}`** *(artist)*  
+- **`PUT /api/artists/:id`** *(artist)*  
   Tweak your profile.
 
 ### **Artwork Management**
 - **`POST /api/artworks`** *(artist)*  
   Drop an artwork with an image.
-- **`POST /api/artworks/{id}/images`** *(artist)*  
+- **`POST /api/artworks/:id/images`** *(artist)*  
   Add more pics.
 - **`GET /api/artworks`**  
   Browse all artworks.
-- **`GET /api/artworks/{id}`**  
+- **`GET /api/artworks/:id`**  
   Scope a single piece.
-- **`PUT /api/artworks/{id}`** *(artist)*  
+- **`PUT /api/artworks/:id`** *(artist)*  
   Edit your work.
-- **`DELETE /api/artworks/{id}`** *(artist/admin)*  
+- **`DELETE /api/artworks/:id`** *(artist/admin)*  
   Trash it.
 
 ### **Categories**
@@ -154,7 +175,7 @@ Hits `http://localhost:3000`. Swagger UI at `/api-docs`.
   Add a category.
 - **`GET /api/categories`**  
   List ‘em.
-- **`PUT /api/categories/{id}`** *(admin)*  
+- **`PUT /api/categories/:id`** *(admin)*  
   Update one.
 
 ### **Orders & Payments**
@@ -162,21 +183,21 @@ Hits `http://localhost:3000`. Swagger UI at `/api-docs`.
   Place an order.
 - **`GET /api/orders`** *(protected)*  
   Your orders.
-- **`GET /api/orders/{id}`** *(protected)*  
+- **`GET /api/orders/:id`** *(protected)*  
   Order details.
-- **`PUT /api/orders/{id}/status`** *(admin)*  
+- **`PUT /api/orders/:id/status`** *(admin)*  
   Update status.
 - **`POST /api/payments`** *(protected)*  
   Start a payment.
-- **`GET /api/payments/{order_id}`** *(protected)*  
+- **`GET /api/payments/:order_id`** *(protected)*  
   Payment status.
-- **`PUT /api/payments/{id}/status`** *(admin)*  
+- **`PUT /api/payments/:id/status`** *(admin)*  
   Finalize payment.
 
 ### **Reviews & Messaging**
 - **`POST /api/reviews`** *(buyer)*  
   Rate an artwork.
-- **`GET /api/reviews/{artwork_id}`**  
+- **`GET /api/reviews/:artwork_id`**  
   See reviews.
 - **`POST /api/messages`** *(protected)*  
   Send a message.
@@ -200,7 +221,6 @@ Unlicensed—free as a bird, no chains. Do what you want, just don’t blame me 
 ### **📌 Notes**
 - **Keycloak Token**: Hit `/realms/digital-marketplace/protocol/openid-connect/token` with `grant_type=password`—we’re still ironing out “Account not fully set up” kinks (check flows, required actions).
 - **Gmail**: Codes might lag—1-hour expiration saves the day.
+- **PayPal**: Test with sandbox; USSD payments need manual confirmation.
 
 Let’s build this marketplace into a legend—drop a star if you’re vibing! 🚀
-
----

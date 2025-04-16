@@ -5,135 +5,132 @@
 ### **User & Account Management**
 
 - **Unique Registration & Verification:**
-  - Every user must register with a unique, verified email address.
-  - New user records are created automatically on first login via Keycloak (using the Keycloak ID as a unique reference).
-  - Accounts remain unverified until the user verifies their email via a verification link sent by the system (handled by `/api/verify-email-code`).
-  - CAPTCHA is required at the pre-registration stage (`/api/pre-register`) to reduce automated signups.
+  - Users must register with a unique email address via `/api/pre-register`, protected by Google reCAPTCHA to block bots.
+  - A 6-digit verification code is sent to the user’s email, valid for 1 hour to account for email delivery delays (`/api/verify-email-code`). Successful verification sets `is_verified = true` and updates `status` to `pending_role_selection`.
+  - On signup, users are inserted into the `users` table with defaults: `role = 'buyer'`, `trust_level = NEW` (0), `status = pending_email_verification`.
+  - Unverified users can request a new code via `/api/resend-verification-code`.
 
-- **Role Assignment & RBAC (Updated):**
-  - Each user is assigned a role—either “buyer”, “artist”, or “admin”—which governs what actions they can perform.
-  - Keycloak is used to authenticate and issue JWT tokens that include these role claims.
-  - **Initial Role Assignment:** Upon registration, users are assigned the "buyer" role by default (`role = 'buyer'`) in the `users` table.
-  - **Mandatory Role Choice Post-Registration:** After email verification and first login, users are redirected to the dashboard where they are prompted to confirm their role ("buyer" or "artist") via a modal (`RolePromptModal`):
-    - If they choose "buyer," they can proceed immediately with no further action.
-    - If they choose "artist," they are redirected to `/request-artist` to submit an artist request, which requires email verification and submission of an ID document and proof of work.
-  - **Artist Role Approval:** The "artist" role requires admin approval:
-    - Users submit a request via `/api/request-artist`, uploading an ID document and proof of work.
-    - Admins review the request via `/api/review-artist-request`. If approved, the user’s role is updated to "artist" in both the `users` table and Keycloak (`role_mappings`).
-    - Until approved, the user remains a "buyer."
-  - **Role Updates:** Users can apply to become an artist at any time via the profile page (`ProfilePage.js`), which links to `/request-artist` if they are a buyer.
-  - **Role Status Check:** The frontend can check the status of an artist request via `/api/request-artist/status`, which returns whether a request is pending or approved.
-  - Endpoints enforce role restrictions:
-    - Only "artist" users can create or modify artworks (`/api/artworks`).
-    - Only "buyers" can place orders (`/api/orders`).
-    - Only "admins" can update order statuses (`/api/orders/:id/status`) or review artist requests (`/api/review-artist-request`).
+- **Role Assignment & Access Control:**
+  - Available roles: `buyer` (default), `artist` (requires verification), `admin` (manually assigned).
+  - After email verification, users select a role via `/api/select-role` (protected endpoint):
+    - Selecting `buyer` sets `status = verified`, keeps `role = buyer`.
+    - Selecting `artist` sets `status = pending_verification`, requiring document submission via `/api/upload-artist-docs`.
+  - Artist verification process:
+    - Users upload ID and portfolio documents (`/api/upload-artist-docs`).
+    - Admins review submissions via `/api/admin/artist-requests/:requestId/review`. Approval sets `role = artist`, `status = verified`, and updates Keycloak role mappings. Rejection retains `role = buyer` with a rejection reason provided.
+  - Role-based permissions:
+    - `buyer`: Can place orders (`/api/orders`), submit reviews (`/api/reviews`), and send messages (`/api/messages`).
+    - `artist`: Can create/edit artworks (`/api/artworks`), manage profile (`/api/artists`), and receive payment notifications.
+    - `admin`: Can update order status (`/api/orders/:id/status`), payment status (`/api/payments/:id/status`), manage categories (`/api/categories`), and review artist requests.
+  - Keycloak enforces role-based access via JWTs, using `keycloak.protect('realm:role')` middleware for protected routes.
 
 - **Trust Level & Reputation:**
-  - New accounts start with a low trust level (e.g., `TRUST_LEVELS.NEW`).
-  - Trust levels are updated to `TRUST_LEVELS.VERIFIED` once a user verifies their email (`/api/verify-email-code`).
-  - Completing verified actions (like successful orders) can further increase trust levels (`updateUserTrustAfterOrder`).
-  - Certain sensitive actions (like placing orders via `/api/orders`) require a minimum trust level (`requireTrustLevel(TRUST_LEVELS.VERIFIED)`).
-
----
+  - Trust levels: `NEW` (0), `VERIFIED` (1), `TRUSTED` (2), `BANNED` (3).
+  - New users start at `NEW`. Email verification advances to `VERIFIED`.
+  - Completing orders without disputes may increase trust to `TRUSTED` (via `updateUserTrustAfterOrder`).
+  - Ordering requires at least `VERIFIED` status, enforced by `requireTrustLevel(TRUST_LEVELS.VERIFIED)` middleware.
+  - `BANNED` users are blocked from actions except viewing public data.
 
 ### **Data Integrity & Consistency**
 
 - **Database Constraints:**
-  - Foreign key relationships enforce that artworks reference an existing category and an artist.
-  - Orders must reference valid buyer and artwork records.
-  - Payment records must reference an order, and order items must reference both an order and a valid artwork.
-  - Artist requests (`artist_requests` table) must reference a valid user (`user_id`).
+  - Foreign keys ensure referential integrity:
+    - `artworks` references `users` (artist_id) and `categories`.
+    - `orders` references `users` (buyer_id) and `artworks`.
+    - `payments` references `orders`.
+    - `artist_requests` references `users`.
+  - `artwork_images` table links multiple images to `artworks` with unique file paths.
+  - `artist_requests` stores ID hash, portfolio file path, and optional selfie path.
 
 - **Audit Logging:**
-  - Critical actions (e.g., account updates via `/api/users/me`, order placements via `/api/orders`, payment updates via `/api/payments/:id/status`, and artist request reviews via `/api/review-artist-request`) are logged to ensure an audit trail for troubleshooting and dispute resolution.
-  - These logs help maintain data integrity and verify that transactions follow expected workflows.
-
----
+  - Critical actions are logged for traceability (stored in `audit_logs` table):
+    - User profile updates (`/api/users/me`).
+    - Role changes (`/api/select-role`).
+    - Artist request reviews (`/api/admin/artist-requests/:requestId/review`).
+    - Order creation/updates (`/api/orders`).
+    - Payment status changes (`/api/payments/:id/status`).
+  - Logs include user ID, action type, timestamp, and relevant metadata.
 
 ### **Order, Payment & Transaction Workflow**
 
 - **Order Processing:**
-  - Only verified buyers (with `TRUST_LEVELS.VERIFIED`) can place orders (`/api/orders`).
-  - Orders follow a fixed lifecycle (e.g., “pending” → “completed” or “canceled”) and cannot be arbitrarily modified except by admins (`/api/orders/:id/status`).
-  - Each order is linked to specific order items and payment records, ensuring traceability.
+  - Only users with `VERIFIED` trust level can place orders (`/api/orders`), specifying `artwork_id` and `total_amount`.
+  - Order statuses: `pending`, `completed`, `canceled`. Only admins can update status via `/api/orders/:id/status`.
+  - Orders are linked to `order_items` (for multiple artworks) and `payments` tables for tracking.
 
 - **Payment Management:**
-  - Payments are recorded as separate entities and must be associated with a valid order (`/api/payments`).
-  - Payment statuses are strictly controlled (e.g., “pending”, “completed”, “failed”) and only admins can update them (`/api/payments/:id/status`).
-  - Inconsistencies (e.g., failed payments) trigger alerts for manual review (via email notifications and messages to artists).
-
----
+  - Payments are initiated via `/api/payments`, requiring `order_id`, `amount`, and `payment_method` (`paypal`, `orange_money`, `myzaka`).
+  - Payment statuses: `pending`, `completed`, `failed`. Admins update status via `/api/payments/:id/status`.
+  - Supported payment methods:
+    - PayPal: Uses sandbox API for testing; completed payments trigger webhook callbacks (`/payment-callback`).
+    - Orange Money/MyZaka: USSD-based, requires manual confirmation via `/api/payments/confirm`.
+  - Successful payments notify artists via email and system message (sent by `SYSTEM_USER_ID`).
 
 ### **Artwork & Media Handling**
 
-- **Artwork Data:**
-  - Every artwork must have a title, price, category, and a reference to the artist (`/api/artworks`).
-  - Artworks can have multiple images; the image paths are stored in the `artwork_images` table.
-  - Endpoints ensure that images are correctly linked to their artwork, and every artwork must have at least one image (enforced by `validateImage` in `/api/artworks`).
+- **Artwork Creation & Management:**
+  - Only users with `artist` role can create artworks via `/api/artworks`, requiring `title`, `price`, `category_id`, and at least one image.
+  - Additional images (up to 5 per artwork) can be uploaded via `/api/artworks/:id/images`.
+  - Artists can edit (`PUT /api/artworks/:id`) or delete (`DELETE /api/artworks/:id`) their own artworks, enforced by `keycloak.protect('realm:artist')`.
+  - Admins can delete artworks for policy violations.
 
 - **Image Storage:**
-  - Uploaded images are stored in a server folder (`./uploads/` for artworks, `./uploads/artist_verification/` for artist requests), and their file paths are saved in the database.
-  - Each artwork image has a unique identifier and is linked via a foreign key to its artwork.
-  - Artist verification documents are stored with filenames that include the user’s Keycloak ID for traceability.
-
----
+  - Artwork images are stored locally at `./uploads/` with timestamped filenames (e.g., `artwork-uuid-timestamp.jpg`).
+  - Artist verification documents are stored at `./uploads/artist_verification/` with filenames like `keycloak_id-timestamp.ext`.
+  - Supported formats: PDF, JPG, JPEG, PNG (max 5MB for verification documents).
+  - File paths are saved in `artwork_images` (for artworks) or `artist_requests` (for verification).
 
 ### **Reviews & Messaging**
 
 - **Reviews:**
-  - Reviews can only be submitted by users with the “buyer” role who have purchased the artwork (`/api/reviews`).
-  - Reviews include a rating (1–5) and optional comments, stored with references to both the artwork and the reviewer.
+  - Buyers can submit reviews via `/api/reviews`, requiring `artwork_id`, `rating` (1-5), and optional `comment`.
+  - Reviews are only allowed for artworks purchased by the user, verified by checking `orders` table.
 
 - **Messaging:**
-  - Only authenticated users can send messages to one another (`/api/messages`).
-  - Each message is stored with sender and receiver IDs, ensuring accountability.
-  - System messages (e.g., notifying artists of a sale via `/api/payments/:id/status`) are sent using a `SYSTEM_USER_ID` as the sender.
-
----
+  - Authenticated users can send messages via `/api/messages`, specifying `receiver_id` and `content`.
+  - System-generated messages (e.g., payment confirmations) are sent using `SYSTEM_USER_ID`.
 
 ### **Security & Anti-Abuse Measures**
 
 - **Rate Limiting & CAPTCHA:**
-  - Sensitive endpoints (e.g., `/api/pre-register`, `/api/verify-email-code`, `/api/request-artist`) are protected by rate limiting (`registrationLimiter`, `authPostLimiter`) and CAPTCHA to prevent abuse and automated signups.
+  - Rate limiters are applied to sensitive endpoints:
+    - `registrationLimiter`: `/api/pre-register`, `/api/verify-email-code` (10 requests/hour).
+    - `authPostLimiter`: `/api/select-role`, `/api/upload-artist-docs` (5 requests/min).
+    - `orderLimiter`: `/api/orders` (3 requests/min).
+  - Google reCAPTCHA v3 protects `/api/pre-register` from automated abuse.
 
 - **Data Security:**
-  - Passwords are managed by Keycloak and stored in a hashed format.
-  - All communications use HTTPS in production (enforced by your infrastructure).
-  - Access to sensitive endpoints is protected via Keycloak JWT tokens and validated against expected roles (`keycloak.protect()`).
+  - Passwords are managed and hashed by Keycloak—never stored in the app DB.
+  - HTTPS is required in production (enforced via `cookie.secure = true`).
+  - JWTs include `sub` (user ID) and `realm_access.roles` for authorization, validated by `keycloak.protect()`.
 
 - **Session & Token Management:**
-  - Sessions are managed with a secure secret and stored in a PostgreSQL-backed session store (via `express-session` or similar middleware).
-  - Tokens must contain correct claims (including roles and user identifiers) before any protected action is allowed (`keycloak.protect()` middleware).
+  - Sessions are stored in PostgreSQL using `connect-pg-simple` for persistence.
+  - Keycloak tokens include user roles and expire based on realm settings (default: 1 hour).
 
----
+### **Overall Workflow**
 
-### **Overall Workflow (Updated)**
+1. **User Registration & Verification:**
+   - User signs up via `/api/pre-register` with email, password, and reCAPTCHA token.
+   - Receives and submits 6-digit code via `/api/verify-email-code`, setting `is_verified = true`, `status = pending_role_selection`.
 
-1. **User Registration & Login:**
-   - Users sign in via Keycloak (`/api/pre-register`).
-   - On first login, if a user doesn’t exist in the local database, they are created with default settings (`role = 'buyer'`, `is_verified = false`, `trust_level = TRUST_LEVELS.NEW`) via `/api/users/me`.
-   - Email verification and CAPTCHA protect against duplicate or fraudulent accounts (`/api/verify-email-code`).
+2. **Role Selection:**
+   - User selects role via `/api/select-role`:
+     - `buyer`: Sets `status = verified`, ready to shop.
+     - `artist`: Sets `status = pending_verification`, prompts document upload (`/api/upload-artist-docs`).
+   - Admins review artist requests (`/api/admin/artist-requests/:requestId/review`), updating `role` and Keycloak mappings on approval.
 
-2. **Role Selection & Artist Request (Updated):**
-   - After email verification, users log in and are redirected to the dashboard.
-   - **Role Prompt:** If the user has not submitted an artist request (checked via `/api/request-artist/status`), they are prompted to choose their role:
-     - **Buyer:** Confirms their role as "buyer" and can proceed immediately.
-     - **Artist:** Redirected to `/request-artist` to submit an artist request, requiring an ID document and proof of work.
-   - **Artist Request Process:** 
-     - Users must be email-verified to submit an artist request (`/api/request-artist`).
-     - Admins review the request via `/api/review-artist-request`. If approved, the user’s role is updated to "artist"; if rejected, they remain a "buyer."
-   - **Profile Role Updates:** Buyers can apply to become artists at any time via the profile page, which links to `/request-artist`.
+3. **Core Actions by Role:**
+   - **Buyers**: Place orders (`/api/orders`), submit reviews (`/api/reviews`), send messages (`/api/messages`).
+   - **Artists**: Create/edit artworks (`/api/artworks`), update profile (`/api/artists/:id`), receive sale notifications.
+   - **Admins**: Manage orders, payments, categories, and artist approvals.
 
-3. **Role-Based Access & Actions:**
-   - Buyers can place orders (`/api/orders`) and leave reviews (`/api/reviews`).
-   - Artists can create and manage artworks, including uploading images (`/api/artworks`).
-   - Admins have elevated privileges to update order statuses (`/api/orders/:id/status`), manage payments (`/api/payments/:id/status`), update categories (`/api/categories`), and review artist requests (`/api/review-artist-request`).
+4. **Transaction Flow:**
+   - Buyer places order → Initiates payment → Admin confirms payment status.
+   - Completed payments trigger artist notifications (email + message).
 
-4. **Transaction Integrity & Audit:**
-   - All orders, payments, and order items are recorded with proper foreign keys and unique identifiers.
-   - Logs and audit trails are maintained for critical actions (e.g., user updates, artist request reviews, order placements).
-
-5. **Security Enforcement:**
-   - JWT tokens (via Keycloak) secure all protected endpoints, ensuring only the right users can access their permitted resources.
+5. **Security & Integrity:**
+   - Rate limiting, reCAPTCHA, JWT validation, and trust levels ensure a secure platform.
+   - Audit logs track all critical actions for accountability.
 
 ---
