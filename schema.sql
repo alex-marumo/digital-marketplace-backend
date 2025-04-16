@@ -22,7 +22,7 @@ SET default_tablespace = '';
 SET default_table_access_method = heap;
 
 --
--- Name: artist_requests; Type: TABLE; Schema: public; Owner: -
+-- Name: artist_requests; Type: TABLE; Schema: public; Owner: postgres
 --
 
 CREATE TABLE public.artist_requests (
@@ -35,12 +35,16 @@ CREATE TABLE public.artist_requests (
     requested_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
     reviewed_at timestamp without time zone,
     reviewed_by uuid,
+    id_hash text NOT NULL,
+    selfie_path text,
     CONSTRAINT artist_requests_status_check CHECK (((status)::text = ANY ((ARRAY['pending'::character varying, 'approved'::character varying, 'rejected'::character varying])::text[])))
 );
 
 
+ALTER TABLE public.artist_requests OWNER TO postgres;
+
 --
--- Name: artist_requests_request_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+-- Name: artist_requests_request_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
 --
 
 ALTER TABLE public.artist_requests ALTER COLUMN request_id ADD GENERATED ALWAYS AS IDENTITY (
@@ -54,7 +58,7 @@ ALTER TABLE public.artist_requests ALTER COLUMN request_id ADD GENERATED ALWAYS 
 
 
 --
--- Name: artists; Type: TABLE; Schema: public; Owner: -
+-- Name: artists; Type: TABLE; Schema: public; Owner: postgres
 --
 
 CREATE TABLE public.artists (
@@ -64,8 +68,10 @@ CREATE TABLE public.artists (
 );
 
 
+ALTER TABLE public.artists OWNER TO postgres;
+
 --
--- Name: artwork_images; Type: TABLE; Schema: public; Owner: -
+-- Name: artwork_images; Type: TABLE; Schema: public; Owner: postgres
 --
 
 CREATE TABLE public.artwork_images (
@@ -75,8 +81,10 @@ CREATE TABLE public.artwork_images (
 );
 
 
+ALTER TABLE public.artwork_images OWNER TO postgres;
+
 --
--- Name: artwork_images_image_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+-- Name: artwork_images_image_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
 --
 
 CREATE SEQUENCE public.artwork_images_image_id_seq
@@ -88,15 +96,17 @@ CREATE SEQUENCE public.artwork_images_image_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.artwork_images_image_id_seq OWNER TO postgres;
+
 --
--- Name: artwork_images_image_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+-- Name: artwork_images_image_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
 
 ALTER SEQUENCE public.artwork_images_image_id_seq OWNED BY public.artwork_images.image_id;
 
 
 --
--- Name: artworks; Type: TABLE; Schema: public; Owner: -
+-- Name: artworks; Type: TABLE; Schema: public; Owner: postgres
 --
 
 CREATE TABLE public.artworks (
@@ -111,8 +121,10 @@ CREATE TABLE public.artworks (
 );
 
 
+ALTER TABLE public.artworks OWNER TO postgres;
+
 --
--- Name: artworks_artwork_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+-- Name: artworks_artwork_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
 --
 
 CREATE SEQUENCE public.artworks_artwork_id_seq
@@ -124,15 +136,17 @@ CREATE SEQUENCE public.artworks_artwork_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.artworks_artwork_id_seq OWNER TO postgres;
+
 --
--- Name: artworks_artwork_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+-- Name: artworks_artwork_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
 
 ALTER SEQUENCE public.artworks_artwork_id_seq OWNED BY public.artworks.artwork_id;
 
 
 --
--- Name: categories; Type: TABLE; Schema: public; Owner: -
+-- Name: categories; Type: TABLE; Schema: public; Owner: postgres
 --
 
 CREATE TABLE public.categories (
@@ -142,8 +156,10 @@ CREATE TABLE public.categories (
 );
 
 
+ALTER TABLE public.categories OWNER TO postgres;
+
 --
--- Name: categories_category_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+-- Name: categories_category_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
 --
 
 CREATE SEQUENCE public.categories_category_id_seq
@@ -155,15 +171,17 @@ CREATE SEQUENCE public.categories_category_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.categories_category_id_seq OWNER TO postgres;
+
 --
--- Name: categories_category_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+-- Name: categories_category_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
 
 ALTER SEQUENCE public.categories_category_id_seq OWNED BY public.categories.category_id;
 
 
 --
--- Name: messages; Type: TABLE; Schema: public; Owner: -
+-- Name: messages; Type: TABLE; Schema: public; Owner: postgres
 --
 
 CREATE TABLE public.messages (
@@ -175,8 +193,10 @@ CREATE TABLE public.messages (
 );
 
 
+ALTER TABLE public.messages OWNER TO postgres;
+
 --
--- Name: messages_message_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+-- Name: messages_message_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
 --
 
 CREATE SEQUENCE public.messages_message_id_seq
@@ -188,15 +208,17 @@ CREATE SEQUENCE public.messages_message_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.messages_message_id_seq OWNER TO postgres;
+
 --
--- Name: messages_message_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+-- Name: messages_message_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
 
 ALTER SEQUENCE public.messages_message_id_seq OWNED BY public.messages.message_id;
 
 
 --
--- Name: order_items; Type: TABLE; Schema: public; Owner: -
+-- Name: order_items; Type: TABLE; Schema: public; Owner: postgres
 --
 
 CREATE TABLE public.order_items (
@@ -210,8 +232,10 @@ CREATE TABLE public.order_items (
 );
 
 
+ALTER TABLE public.order_items OWNER TO postgres;
+
 --
--- Name: order_items_order_item_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+-- Name: order_items_order_item_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
 --
 
 CREATE SEQUENCE public.order_items_order_item_id_seq
@@ -223,15 +247,17 @@ CREATE SEQUENCE public.order_items_order_item_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.order_items_order_item_id_seq OWNER TO postgres;
+
 --
--- Name: order_items_order_item_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+-- Name: order_items_order_item_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
 
 ALTER SEQUENCE public.order_items_order_item_id_seq OWNED BY public.order_items.order_item_id;
 
 
 --
--- Name: orders; Type: TABLE; Schema: public; Owner: -
+-- Name: orders; Type: TABLE; Schema: public; Owner: postgres
 --
 
 CREATE TABLE public.orders (
@@ -245,8 +271,10 @@ CREATE TABLE public.orders (
 );
 
 
+ALTER TABLE public.orders OWNER TO postgres;
+
 --
--- Name: orders_order_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+-- Name: orders_order_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
 --
 
 CREATE SEQUENCE public.orders_order_id_seq
@@ -258,15 +286,17 @@ CREATE SEQUENCE public.orders_order_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.orders_order_id_seq OWNER TO postgres;
+
 --
--- Name: orders_order_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+-- Name: orders_order_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
 
 ALTER SEQUENCE public.orders_order_id_seq OWNED BY public.orders.order_id;
 
 
 --
--- Name: payments; Type: TABLE; Schema: public; Owner: -
+-- Name: payments; Type: TABLE; Schema: public; Owner: postgres
 --
 
 CREATE TABLE public.payments (
@@ -280,8 +310,10 @@ CREATE TABLE public.payments (
 );
 
 
+ALTER TABLE public.payments OWNER TO postgres;
+
 --
--- Name: payments_payment_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+-- Name: payments_payment_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
 --
 
 CREATE SEQUENCE public.payments_payment_id_seq
@@ -293,15 +325,17 @@ CREATE SEQUENCE public.payments_payment_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.payments_payment_id_seq OWNER TO postgres;
+
 --
--- Name: payments_payment_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+-- Name: payments_payment_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
 
 ALTER SEQUENCE public.payments_payment_id_seq OWNED BY public.payments.payment_id;
 
 
 --
--- Name: reviews; Type: TABLE; Schema: public; Owner: -
+-- Name: reviews; Type: TABLE; Schema: public; Owner: postgres
 --
 
 CREATE TABLE public.reviews (
@@ -315,8 +349,10 @@ CREATE TABLE public.reviews (
 );
 
 
+ALTER TABLE public.reviews OWNER TO postgres;
+
 --
--- Name: reviews_review_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+-- Name: reviews_review_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
 --
 
 CREATE SEQUENCE public.reviews_review_id_seq
@@ -328,15 +364,30 @@ CREATE SEQUENCE public.reviews_review_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.reviews_review_id_seq OWNER TO postgres;
+
 --
--- Name: reviews_review_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+-- Name: reviews_review_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
 
 ALTER SEQUENCE public.reviews_review_id_seq OWNED BY public.reviews.review_id;
 
 
 --
--- Name: users; Type: TABLE; Schema: public; Owner: -
+-- Name: sessions; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.sessions (
+    sid character varying NOT NULL,
+    sess json NOT NULL,
+    expire timestamp(6) without time zone NOT NULL
+);
+
+
+ALTER TABLE public.sessions OWNER TO postgres;
+
+--
+-- Name: users; Type: TABLE; Schema: public; Owner: postgres
 --
 
 CREATE TABLE public.users (
@@ -350,12 +401,15 @@ CREATE TABLE public.users (
     verification_token character varying(255),
     token_expires timestamp without time zone,
     trust_level integer DEFAULT 1,
+    status text DEFAULT 'pending_email_verification'::text NOT NULL,
     CONSTRAINT users_role_check CHECK (((role)::text = ANY ((ARRAY['buyer'::character varying, 'artist'::character varying, 'admin'::character varying])::text[])))
 );
 
 
+ALTER TABLE public.users OWNER TO postgres;
+
 --
--- Name: users_user_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+-- Name: users_user_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
 --
 
 CREATE SEQUENCE public.users_user_id_seq
@@ -367,15 +421,17 @@ CREATE SEQUENCE public.users_user_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.users_user_id_seq OWNER TO postgres;
+
 --
--- Name: users_user_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+-- Name: users_user_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
 
 ALTER SEQUENCE public.users_user_id_seq OWNED BY public.users.user_id;
 
 
 --
--- Name: verification_codes; Type: TABLE; Schema: public; Owner: -
+-- Name: verification_codes; Type: TABLE; Schema: public; Owner: postgres
 --
 
 CREATE TABLE public.verification_codes (
@@ -385,8 +441,10 @@ CREATE TABLE public.verification_codes (
 );
 
 
+ALTER TABLE public.verification_codes OWNER TO postgres;
+
 --
--- Name: verification_tokens; Type: TABLE; Schema: public; Owner: -
+-- Name: verification_tokens; Type: TABLE; Schema: public; Owner: postgres
 --
 
 CREATE TABLE public.verification_tokens (
@@ -399,8 +457,10 @@ CREATE TABLE public.verification_tokens (
 );
 
 
+ALTER TABLE public.verification_tokens OWNER TO postgres;
+
 --
--- Name: verification_tokens_token_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+-- Name: verification_tokens_token_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
 --
 
 CREATE SEQUENCE public.verification_tokens_token_id_seq
@@ -412,85 +472,87 @@ CREATE SEQUENCE public.verification_tokens_token_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.verification_tokens_token_id_seq OWNER TO postgres;
+
 --
--- Name: verification_tokens_token_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+-- Name: verification_tokens_token_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
 
 ALTER SEQUENCE public.verification_tokens_token_id_seq OWNED BY public.verification_tokens.token_id;
 
 
 --
--- Name: artwork_images image_id; Type: DEFAULT; Schema: public; Owner: -
+-- Name: artwork_images image_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.artwork_images ALTER COLUMN image_id SET DEFAULT nextval('public.artwork_images_image_id_seq'::regclass);
 
 
 --
--- Name: artworks artwork_id; Type: DEFAULT; Schema: public; Owner: -
+-- Name: artworks artwork_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.artworks ALTER COLUMN artwork_id SET DEFAULT nextval('public.artworks_artwork_id_seq'::regclass);
 
 
 --
--- Name: categories category_id; Type: DEFAULT; Schema: public; Owner: -
+-- Name: categories category_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.categories ALTER COLUMN category_id SET DEFAULT nextval('public.categories_category_id_seq'::regclass);
 
 
 --
--- Name: messages message_id; Type: DEFAULT; Schema: public; Owner: -
+-- Name: messages message_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.messages ALTER COLUMN message_id SET DEFAULT nextval('public.messages_message_id_seq'::regclass);
 
 
 --
--- Name: order_items order_item_id; Type: DEFAULT; Schema: public; Owner: -
+-- Name: order_items order_item_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.order_items ALTER COLUMN order_item_id SET DEFAULT nextval('public.order_items_order_item_id_seq'::regclass);
 
 
 --
--- Name: orders order_id; Type: DEFAULT; Schema: public; Owner: -
+-- Name: orders order_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.orders ALTER COLUMN order_id SET DEFAULT nextval('public.orders_order_id_seq'::regclass);
 
 
 --
--- Name: payments payment_id; Type: DEFAULT; Schema: public; Owner: -
+-- Name: payments payment_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.payments ALTER COLUMN payment_id SET DEFAULT nextval('public.payments_payment_id_seq'::regclass);
 
 
 --
--- Name: reviews review_id; Type: DEFAULT; Schema: public; Owner: -
+-- Name: reviews review_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.reviews ALTER COLUMN review_id SET DEFAULT nextval('public.reviews_review_id_seq'::regclass);
 
 
 --
--- Name: users user_id; Type: DEFAULT; Schema: public; Owner: -
+-- Name: users user_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.users ALTER COLUMN user_id SET DEFAULT nextval('public.users_user_id_seq'::regclass);
 
 
 --
--- Name: verification_tokens token_id; Type: DEFAULT; Schema: public; Owner: -
+-- Name: verification_tokens token_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.verification_tokens ALTER COLUMN token_id SET DEFAULT nextval('public.verification_tokens_token_id_seq'::regclass);
 
 
 --
--- Name: artist_requests artist_requests_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: artist_requests artist_requests_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.artist_requests
@@ -498,7 +560,7 @@ ALTER TABLE ONLY public.artist_requests
 
 
 --
--- Name: artists artists_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: artists artists_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.artists
@@ -506,7 +568,7 @@ ALTER TABLE ONLY public.artists
 
 
 --
--- Name: artwork_images artwork_images_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: artwork_images artwork_images_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.artwork_images
@@ -514,7 +576,7 @@ ALTER TABLE ONLY public.artwork_images
 
 
 --
--- Name: artworks artworks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: artworks artworks_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.artworks
@@ -522,7 +584,7 @@ ALTER TABLE ONLY public.artworks
 
 
 --
--- Name: categories categories_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: categories categories_name_key; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.categories
@@ -530,7 +592,7 @@ ALTER TABLE ONLY public.categories
 
 
 --
--- Name: categories categories_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: categories categories_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.categories
@@ -538,7 +600,7 @@ ALTER TABLE ONLY public.categories
 
 
 --
--- Name: messages messages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: messages messages_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.messages
@@ -546,7 +608,7 @@ ALTER TABLE ONLY public.messages
 
 
 --
--- Name: order_items order_items_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: order_items order_items_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.order_items
@@ -554,7 +616,7 @@ ALTER TABLE ONLY public.order_items
 
 
 --
--- Name: orders orders_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: orders orders_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.orders
@@ -562,7 +624,7 @@ ALTER TABLE ONLY public.orders
 
 
 --
--- Name: payments payments_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: payments payments_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.payments
@@ -570,7 +632,7 @@ ALTER TABLE ONLY public.payments
 
 
 --
--- Name: reviews reviews_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: reviews reviews_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.reviews
@@ -578,7 +640,15 @@ ALTER TABLE ONLY public.reviews
 
 
 --
--- Name: users unique_keycloak_id; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: sessions sessions_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT sessions_pkey PRIMARY KEY (sid);
+
+
+--
+-- Name: users unique_keycloak_id; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.users
@@ -586,7 +656,7 @@ ALTER TABLE ONLY public.users
 
 
 --
--- Name: users users_email_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: users users_email_key; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.users
@@ -594,7 +664,7 @@ ALTER TABLE ONLY public.users
 
 
 --
--- Name: users users_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: users users_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.users
@@ -602,7 +672,7 @@ ALTER TABLE ONLY public.users
 
 
 --
--- Name: verification_codes verification_codes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: verification_codes verification_codes_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.verification_codes
@@ -610,7 +680,7 @@ ALTER TABLE ONLY public.verification_codes
 
 
 --
--- Name: verification_tokens verification_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: verification_tokens verification_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.verification_tokens
@@ -618,14 +688,21 @@ ALTER TABLE ONLY public.verification_tokens
 
 
 --
--- Name: idx_verification_tokens_token; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_sessions_expire; Type: INDEX; Schema: public; Owner: postgres
+--
+
+CREATE INDEX idx_sessions_expire ON public.sessions USING btree (expire);
+
+
+--
+-- Name: idx_verification_tokens_token; Type: INDEX; Schema: public; Owner: postgres
 --
 
 CREATE INDEX idx_verification_tokens_token ON public.verification_tokens USING btree (token);
 
 
 --
--- Name: artist_requests artist_requests_reviewed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: artist_requests artist_requests_reviewed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.artist_requests
@@ -633,7 +710,7 @@ ALTER TABLE ONLY public.artist_requests
 
 
 --
--- Name: artist_requests artist_requests_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: artist_requests artist_requests_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.artist_requests
@@ -641,7 +718,7 @@ ALTER TABLE ONLY public.artist_requests
 
 
 --
--- Name: artists artists_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: artists artists_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.artists
@@ -649,7 +726,7 @@ ALTER TABLE ONLY public.artists
 
 
 --
--- Name: artwork_images artwork_images_artwork_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: artwork_images artwork_images_artwork_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.artwork_images
@@ -657,7 +734,7 @@ ALTER TABLE ONLY public.artwork_images
 
 
 --
--- Name: artworks artworks_artist_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: artworks artworks_artist_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.artworks
@@ -665,7 +742,7 @@ ALTER TABLE ONLY public.artworks
 
 
 --
--- Name: artworks artworks_category_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: artworks artworks_category_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.artworks
@@ -673,7 +750,7 @@ ALTER TABLE ONLY public.artworks
 
 
 --
--- Name: messages messages_receiver_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: messages messages_receiver_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.messages
@@ -681,7 +758,7 @@ ALTER TABLE ONLY public.messages
 
 
 --
--- Name: messages messages_sender_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: messages messages_sender_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.messages
@@ -689,7 +766,7 @@ ALTER TABLE ONLY public.messages
 
 
 --
--- Name: order_items order_items_artwork_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: order_items order_items_artwork_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.order_items
@@ -697,7 +774,7 @@ ALTER TABLE ONLY public.order_items
 
 
 --
--- Name: order_items order_items_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: order_items order_items_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.order_items
@@ -705,7 +782,7 @@ ALTER TABLE ONLY public.order_items
 
 
 --
--- Name: orders orders_buyer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: orders orders_buyer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.orders
@@ -713,7 +790,7 @@ ALTER TABLE ONLY public.orders
 
 
 --
--- Name: payments payments_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: payments payments_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.payments
@@ -721,7 +798,7 @@ ALTER TABLE ONLY public.payments
 
 
 --
--- Name: reviews reviews_artwork_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: reviews reviews_artwork_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.reviews
@@ -729,7 +806,7 @@ ALTER TABLE ONLY public.reviews
 
 
 --
--- Name: reviews reviews_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: reviews reviews_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.reviews
@@ -737,11 +814,158 @@ ALTER TABLE ONLY public.reviews
 
 
 --
--- Name: verification_tokens verification_tokens_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: verification_tokens verification_tokens_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.verification_tokens
     ADD CONSTRAINT verification_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(keycloak_id) ON DELETE CASCADE;
+
+
+--
+-- Name: SCHEMA public; Type: ACL; Schema: -; Owner: pg_database_owner
+--
+
+GRANT USAGE ON SCHEMA public TO marketplace_user;
+
+
+--
+-- Name: TABLE artist_requests; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON TABLE public.artist_requests TO marketplace_user;
+
+
+--
+-- Name: SEQUENCE artist_requests_request_id_seq; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON SEQUENCE public.artist_requests_request_id_seq TO marketplace_user;
+
+
+--
+-- Name: TABLE artists; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON TABLE public.artists TO marketplace_user;
+
+
+--
+-- Name: TABLE artwork_images; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON TABLE public.artwork_images TO marketplace_user;
+
+
+--
+-- Name: SEQUENCE artwork_images_image_id_seq; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON SEQUENCE public.artwork_images_image_id_seq TO marketplace_user;
+
+
+--
+-- Name: TABLE artworks; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON TABLE public.artworks TO marketplace_user;
+
+
+--
+-- Name: SEQUENCE artworks_artwork_id_seq; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON SEQUENCE public.artworks_artwork_id_seq TO marketplace_user;
+
+
+--
+-- Name: TABLE categories; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON TABLE public.categories TO marketplace_user;
+
+
+--
+-- Name: TABLE messages; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON TABLE public.messages TO marketplace_user;
+
+
+--
+-- Name: TABLE order_items; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON TABLE public.order_items TO marketplace_user;
+
+
+--
+-- Name: TABLE orders; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON TABLE public.orders TO marketplace_user;
+
+
+--
+-- Name: TABLE payments; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON TABLE public.payments TO marketplace_user;
+
+
+--
+-- Name: TABLE reviews; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON TABLE public.reviews TO marketplace_user;
+
+
+--
+-- Name: TABLE sessions; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON TABLE public.sessions TO marketplace_user;
+
+
+--
+-- Name: TABLE users; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON TABLE public.users TO marketplace_user;
+
+
+--
+-- Name: SEQUENCE users_user_id_seq; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON SEQUENCE public.users_user_id_seq TO marketplace_user;
+
+
+--
+-- Name: TABLE verification_codes; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON TABLE public.verification_codes TO marketplace_user;
+
+
+--
+-- Name: TABLE verification_tokens; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON TABLE public.verification_tokens TO marketplace_user;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR TABLES; Type: DEFAULT ACL; Schema: public; Owner: postgres
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT SELECT,INSERT,DELETE,UPDATE ON TABLES TO marketplace_user;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR TABLES; Type: DEFAULT ACL; Schema: -; Owner: postgres
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres GRANT ALL ON TABLES TO marketplace_user;
 
 
 --
