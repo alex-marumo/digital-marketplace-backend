@@ -12,19 +12,22 @@ const cors = require('cors');
 const session = require('express-session');
 const { keycloak, sessionStore } = require('./keycloak');
 const axios = require('axios');
-const path = require('path'); // Add this
+const path = require('path');
 const multer = require('multer');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const swaggerUI = require('swagger-ui-express');
-const fs = require('fs');
 const { pool } = require('./db');
 const { sendVerificationEmail, sendEmail } = require('./services/emailService');
 const { createVerificationCode, verifyCode } = require('./services/verificationService');
 const { verifyRecaptcha } = require('./services/recaptchaService');
+const fs = require('fs');
+const fsPromises = fs.promises; // Switch to promises for async handling
+
 
 const { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter } = require('./middleware/rateLimiter');
 console.log('Rate Limiters:', { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter });
+
 if (process.env.NODE_ENV === 'development') {
   console.debug('Keycloak Config:', {
     url: process.env.KEYCLOAK_URL,
@@ -37,91 +40,102 @@ if (process.env.NODE_ENV === 'development') {
 const { requireTrustLevel } = require('./middleware/trustLevel');
 const { TRUST_LEVELS, updateTrustLevel, updateUserTrustAfterOrder } = require('./services/trustService');
 
-const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json'); // Now works
-const swaggerData = JSON.parse(fs.readFileSync(swaggerFile, 'utf8'));
+const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json');
 
-const app = express();
-const port = process.env.PORT || 3000;
-app.set('trust proxy', 1);
+(async () => {
+  const swaggerData = JSON.parse(await fsPromises.readFile(swaggerFile, 'utf8'));
 
-// Middleware setup
-app.use('/api-docs', swaggerUI.serve, swaggerUI.setup(swaggerData));
-app.use(express.json());
-app.use(cors({ origin: "http://localhost:3001" }));
-app.use(bodyParser.json());
+  const app = express();
+  const port = process.env.PORT || 3000;
+  app.set('trust proxy', 1);
 
-// index.js, after middleware setup
-app.use(session({
-  store: sessionStore,
-  secret: process.env.SESSION_SECRET || "your-secret-here",
-  resave: false,
-  saveUninitialized: false,
-  cookie: { secure: process.env.NODE_ENV === 'production' } // Set to true if HTTPS
-}));
-app.use((req, res, next) => {
-  console.log('Session exists pre-Keycloak:', !!req.session);
-  if (req.session) req.session.test = 'test-value';
-  next();
-});
+  // Swagger setup
+  app.use('/api-docs', swaggerUI.serve, swaggerUI.setup(swaggerData));
 
-// Keycloak middleware once
-app.use(keycloak.middleware());
+  // CORS config
+  app.use(cors({ 
+    origin: "http://localhost:3001",
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Authorization', 'Content-Type']
+  }));
 
-// Test route
-app.get('/test-session', (req, res) => {
-  console.log('Test route - req.session:', req.session);
-  res.json({ session: req.session ? 'alive' : 'dead', test: req.session?.test });
-});
+  app.use(express.json());
+  app.use(bodyParser.json());
 
-const { createProxyMiddleware } = require('http-proxy-middleware');
-app.use(
-  '/keycloak',
-  createProxyMiddleware({
-    target: process.env.KEYCLOAK_URL || 'http://localhost:8080',
-    changeOrigin: true,
-    pathRewrite: { '^/keycloak': '' },
-    onProxyRes: (proxyRes) => {
-      proxyRes.headers['Access-Control-Allow-Origin'] = 'http://localhost:3001';
-      proxyRes.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,DELETE,OPTIONS';
-      proxyRes.headers['Access-Control-Allow-Headers'] = 'Authorization,Content-Type';
+  app.use(session({
+    store: sessionStore,
+    secret: process.env.SESSION_SECRET || "your-secret-here",
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    }
+  }));
+
+  app.use((req, res, next) => {
+    console.log('Session exists pre-Keycloak:', !!req.session);
+    if (req.session) req.session.test = 'test-value';
+    next();
+  });
+
+  app.use(keycloak.middleware());
+
+  app.get('/test-session', publicDataLimiter, (req, res) => {
+    console.log('Test route - req.session:', req.session);
+    res.json({ session: req.session ? 'alive' : 'dead', test: req.session?.test });
+  });
+
+  const { createProxyMiddleware } = require('http-proxy-middleware');
+  app.use(
+    '/keycloak',
+    createProxyMiddleware({
+      target: process.env.KEYCLOAK_URL || 'http://localhost:8080',
+      changeOrigin: true,
+      pathRewrite: { '^/keycloak': '' },
+      onProxyRes: (proxyRes) => {
+        proxyRes.headers['Access-Control-Allow-Origin'] = 'http://localhost:3001';
+        proxyRes.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,DELETE,OPTIONS';
+        proxyRes.headers['Access-Control-Allow-Headers'] = 'Authorization,Content-Type';
+      },
+    })
+  );
+
+  // Multer setup for general uploads (artworks)
+  const storage = multer.diskStorage({
+    destination: './Uploads/',
+    filename: (req, file, cb) => {
+      cb(null, `${Date.now()}${path.extname(file.originalname)}`);
     },
-  })
-);
+  });
+  const upload = multer({ storage });
 
-// Multer setup for general uploads (artworks)
-const storage = multer.diskStorage({
-  destination: './uploads/',
-  filename: (req, file, cb) => {
-    cb(null, `${Date.now()}${path.extname(file.originalname)}`);
-  },
-});
-const upload = multer({ storage });
-
-// Multer setup for artist verification
-const artistStorage = multer.diskStorage({
-  destination: './uploads/artist_verification/',
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    if (!['.pdf', '.jpg', '.jpeg', '.png'].includes(ext)) {
-      return cb(new Error('Invalid file type—only PDF, JPG, PNG allowed'));
-    }
-    cb(null, `${req.kauth.grant.access_token.content.sub}-${Date.now()}${ext}`);
-  },
-});
-const artistUpload = multer({
-  storage: artistStorage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max
-  fileFilter: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    if (!['.pdf', '.jpg', '.jpeg', '.png'].includes(ext)) {
-      return cb(new Error('Invalid file type'));
-    }
-    cb(null, true);
-  },
-}).fields([
-  { name: 'idDocument', maxCount: 1 },
-  { name: 'proofOfWork', maxCount: 1 },
-]);
+  // Multer setup for artist verification
+  const artistStorage = multer.diskStorage({
+    destination: './Uploads/artist_verification/',
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname).toLowerCase();
+      if (!['.pdf', '.jpg', '.jpeg', '.png'].includes(ext)) {
+        return cb(new Error('Invalid file type—only PDF, JPG, PNG allowed'));
+      }
+      cb(null, `${req.kauth.grant.access_token.content.sub}-${Date.now()}${ext}`);
+    },
+  });
+  const artistUpload = multer({
+    storage: artistStorage,
+    limits: { fileSize: 5 * 1024 * 1024 },
+    fileFilter: (req, file, cb) => {
+      const ext = path.extname(file.originalname).toLowerCase();
+      if (!['.pdf', '.jpg', '.jpeg', '.png'].includes(ext)) {
+        return cb(new Error('Invalid file type'));
+      }
+      cb(null, true);
+    },
+  }).fields([
+    { name: 'idDocument', maxCount: 1 },
+    { name: 'proofOfWork', maxCount: 1 },
+  ]);
 
 // --- User Routes ---
 
@@ -440,36 +454,83 @@ app.get('/api/admin/artist-requests/pending', keycloak.protect('realm:admin'), a
 app.get('/api/admin/artist-requests/:requestId/file/:type', keycloak.protect('realm:admin'), authGetLimiter, async (req, res) => {
   try {
     const { requestId, type } = req.params;
+    const accessToken = req.query.access_token || req.kauth?.grant?.access_token?.token;
+    const userId = req.kauth?.grant?.access_token?.content?.sub || (accessToken ? keycloak.verifyToken(accessToken)?.content?.sub : null);
+    const roles = req.kauth?.grant?.access_token?.content?.realm_access?.roles || (accessToken ? keycloak.verifyToken(accessToken)?.content?.realm_access?.roles : []);
+    console.log('Fetching document:', { requestId, type, userId, roles, hasQueryToken: !!req.query.access_token });
     const validTypes = ['id_document', 'proof_of_work', 'selfie'];
     if (!validTypes.includes(type)) {
+      console.error('Invalid document type:', type);
       return res.status(400).json({ error: 'Invalid document type' });
+    }
+    if (!roles.includes('admin')) {
+      console.error('User lacks admin role:', { userId, roles });
+      return res.status(403).json({ error: 'Admin role required' });
     }
     const column = type === 'id_document' ? 'id_document_path' :
                    type === 'proof_of_work' ? 'proof_of_work_path' : 'selfie_path';
     
     const { rows } = await pool.query(
-      `SELECT ${column} AS file_path FROM artist_requests WHERE request_id = $1 AND status = $2`,
-      [requestId, 'pending']
+      `SELECT ${column} AS file_path FROM artist_requests WHERE request_id = $1`,
+      [requestId]
     );
+    console.log('DB query result:', { requestId, type, rows, file_path: rows[0]?.file_path });
     if (!rows.length || !rows[0].file_path) {
-      return res.status(404).json({ error: 'Document not found' });
+      console.error('Document not found in DB:', { requestId, type, rows });
+      return res.status(404).json({ error: 'Document not found in database' });
     }
-    const filePath = path.resolve(rows[0].file_path);
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: 'File missing' });
+    const baseDir = path.resolve(__dirname, 'Uploads', 'artist_verification');
+    const rawFilePath = rows[0].file_path;
+    const cleanedFileName = path.basename(rawFilePath.replace(/^.*artist_verification[\\/]?/i, '')).toLowerCase();
+    const filePath = path.join(baseDir, cleanedFileName);
+    console.log('File path details:', {
+      rawFilePath,
+      cleanedFileName,
+      filePath,
+      baseDir,
+      cwd: __dirname
+    });
+
+    let fileExists = false;
+    try {
+      await fs.access(filePath, fs.constants.R_OK);
+      fileExists = true;
+      console.log('File exists and is readable:', filePath);
+    } catch (err) {
+      console.warn('File access failed:', { filePath, error: err.message });
     }
-    const ext = path.extname(filePath).toLowerCase();
-    const contentType = {
-      '.pdf': 'application/pdf',
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.png': 'image/png'
-    }[ext] || 'application/octet-stream';
-    res.setHeader('Content-Type', contentType);
-    fs.createReadStream(filePath).pipe(res);
+
+    if (!fileExists) {
+      let files = [];
+      try {
+        files = await fs.readdir(baseDir);
+        const matchingFile = files.find(f => f.toLowerCase() === cleanedFileName);
+        if (matchingFile) {
+          console.log('Found matching file with different case:', matchingFile);
+          const altFilePath = path.join(baseDir, matchingFile);
+          try {
+            await fs.access(altFilePath, fs.constants.R_OK);
+            return await streamFile(res, altFilePath);
+          } catch (altErr) {
+            console.warn('Alternate file access failed:', { altFilePath, error: altErr.message });
+          }
+        }
+        console.error('File missing on disk:', { filePath, requestId, type, availableFiles: files });
+        return res.status(404).json({ error: 'File missing on disk', availableFiles: files });
+      } catch (dirErr) {
+        console.error('Directory read failed:', { baseDir, error: dirErr.message });
+        return res.status(403).json({ error: 'Cannot access directory', details: dirErr.message });
+      }
+    }
+    await streamFile(res, filePath);
   } catch (error) {
-    console.error('Error streaming document:', error.message);
-    res.status(500).json({ error: 'Server error' });
+    console.error('Error streaming document:', {
+      message: error.message,
+      stack: error.stack,
+      requestId: req.params.requestId,
+      type: req.params.type
+    });
+    res.status(500).json({ error: 'Server error', details: error.message, stack: error.stack });
   }
 });
 
@@ -564,6 +625,73 @@ app.post('/api/admin/artist-requests/:requestId/review', keycloak.protect('realm
     res.status(500).json({ error: 'Review failed', details: error.message });
   } finally {
     client.release();
+  }
+});
+
+// Generate a signed URL
+app.get('/api/admin/artist-requests/:requestId/file/:type/signed-url', keycloak.protect('realm:admin'), authGetLimiter, async (req, res) => {
+  try {
+    const { requestId, type } = req.params;
+    const validTypes = ['id_document', 'proof_of_work', 'selfie'];
+    if (!validTypes.includes(type)) {
+      return res.status(400).json({ error: 'Invalid document type' });
+    }
+    const column = type === 'id_document' ? 'id_document_path' :
+                   type === 'proof_of_work' ? 'proof_of_work_path' : 'selfie_path';
+    
+    const { rows } = await pool.query(
+      `SELECT ${column} AS file_path FROM artist_requests WHERE request_id = $1`,
+      [requestId]
+    );
+    if (!rows.length || !rows[0].file_path) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+    
+    // Create a signed token (expires in 5 minutes)
+    const token = crypto.randomBytes(32).toString('hex');
+    const expires = Date.now() + 5 * 60 * 1000; // 5 minutes
+    await pool.query(
+      'INSERT INTO signed_urls (token, file_path, expires_at) VALUES ($1, $2, $3)',
+      [token, rows[0].file_path, new Date(expires)]
+    );
+    
+    const signedUrl = `http://localhost:3001/api/admin/artist-requests/file?token=${token}`;
+    res.json({ signedUrl });
+  } catch (error) {
+    console.error('Error generating signed URL:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Serve the file with the token
+app.get('/api/admin/artist-requests/file', authGetLimiter, async (req, res) => {
+  const { token } = req.query;
+  if (!token) {
+    return res.status(400).json({ error: 'Missing token' });
+  }
+  try {
+    const { rows } = await pool.query(
+      'SELECT file_path FROM signed_urls WHERE token = $1 AND expires_at > NOW()',
+      [token]
+    );
+    if (!rows.length) {
+      return res.status(403).json({ error: 'Invalid or expired token' });
+    }
+    const filePath = path.join(__dirname, rows[0].file_path);
+    try {
+      await fsPromises.access(filePath, fs.constants.R_OK);
+    } catch (err) {
+      return res.status(404).json({ error: 'File not found or not readable' });
+    }
+    // Add CORS headers
+    res.setHeader('Access-Control-Allow-Origin', 'http://localhost:3001');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Content-Type', 'image/png');
+    fs.createReadStream(filePath).pipe(res);
+  } catch (error) {
+    console.error('Error serving file:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -1277,5 +1405,33 @@ const insertArtworkImage = async (artwork_id, imagePath) => {
   }
 };
 
+async function streamFile(res, filePath) {
+  try {
+    const ext = path.extname(filePath).toLowerCase();
+    const contentType = {
+      '.pdf': 'application/pdf',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png'
+    }[ext] || 'application/octet-stream';
+    console.log('Streaming file:', { filePath, contentType, ext });
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Access-Control-Allow-Origin', 'http://localhost:3001'); // Frontend port, not 3000
+    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,HEAD');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization,Content-Type');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Type');
+    const stream = require('fs').createReadStream(filePath);
+    stream.on('error', (err) => {
+      console.error('Stream error:', { filePath, error: err.message });
+      res.status(500).json({ error: 'Failed to stream file', details: err.message });
+    });
+    stream.pipe(res);
+  } catch (error) {
+    console.error('Stream setup error:', { filePath, error: error.message });
+    res.status(500).json({ error: 'Failed to set up stream', details: error.message });
+  }
+}
+
 // Start the server
 app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
+})();
