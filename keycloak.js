@@ -30,6 +30,16 @@ const keycloak = new Keycloak({
   'policy-enforcer': {}
 });
 
+keycloak.verifyToken = async (token) => {
+  try {
+    const grant = await keycloak.grantManager.validateAccessToken(token);
+    return grant.isExpired() ? null : grant.access_token;
+  } catch (err) {
+    console.error('Token validation failed:', err.message);
+    return null;
+  }
+};
+
 keycloak.debug = true;
 
 module.exports = { keycloak, sessionStore };

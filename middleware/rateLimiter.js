@@ -24,42 +24,54 @@ const messageLimiter = rateLimit({
   windowMs: WINDOW_MS,
   max: 20,
   message: { error: 'Too many messages sent, please try again later.' },
-  keyGenerator: (req) => req.kauth.grant.access_token.content.sub
+  keyGenerator: (req) => {
+    return req.kauth?.grant?.access_token?.content?.sub || req.query.token || req.ip || 'anonymous';
+  }
 });
 
 const artworkManagementLimiter = rateLimit({
   windowMs: WINDOW_MS,
   max: 10,
   message: { error: 'Too many artwork operations, please try again later.' },
-  keyGenerator: (req) => req.kauth.grant.access_token.content.sub
+  keyGenerator: (req) => {
+    return req.kauth?.grant?.access_token?.content?.sub || req.query.token || req.ip || 'anonymous';
+  }
 });
 
 const authGetLimiter = rateLimit({
   windowMs: WINDOW_MS,
   max: 50,
   message: { error: 'Too many requests, please try again later.' },
-  keyGenerator: (req) => req.kauth.grant.access_token.content.sub
+  keyGenerator: (req) => {
+    return req.kauth?.grant?.access_token?.content?.sub || req.query.token || req.ip || 'anonymous';
+  }
 });
 
 const authPostLimiter = rateLimit({
   windowMs: WINDOW_MS,
   max: 20,
   message: { error: 'Too many actions, please try again later.' },
-  keyGenerator: (req) => req.kauth.grant.access_token.content.sub
+  keyGenerator: (req) => {
+    return req.kauth?.grant?.access_token?.content?.sub || req.query.token || req.ip || 'anonymous';
+  }
 });
 
 const authPutLimiter = rateLimit({
   windowMs: WINDOW_MS,
   max: 15,
   message: { error: 'Too many updates, please try again later.' },
-  keyGenerator: (req) => req.kauth.grant.access_token.content.sub
+  keyGenerator: (req) => {
+    return req.kauth?.grant?.access_token?.content?.sub || req.query.token || req.ip || 'anonymous';
+  }
 });
 
 const authDeleteLimiter = rateLimit({
   windowMs: WINDOW_MS,
   max: 10,
   message: { error: 'Too many deletions, please try again later.' },
-  keyGenerator: (req) => req.kauth.grant.access_token.content.sub
+  keyGenerator: (req) => {
+    return req.kauth?.grant?.access_token?.content?.sub || req.query.token || req.ip || 'anonymous';
+  }
 });
 
 module.exports = {
