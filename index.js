@@ -19,7 +19,7 @@ const nodemailer = require('nodemailer');
 const swaggerUI = require('swagger-ui-express');
 const fs = require('fs');
 const { pool } = require('./db');
-const { sendVerificationEmail } = require('./services/emailService');
+const { sendVerificationEmail, sendEmail } = require('./services/emailService');
 const { createVerificationCode, verifyCode } = require('./services/verificationService');
 const { verifyRecaptcha } = require('./services/recaptchaService');
 
@@ -72,6 +72,21 @@ app.get('/test-session', (req, res) => {
   console.log('Test route - req.session:', req.session);
   res.json({ session: req.session ? 'alive' : 'dead', test: req.session?.test });
 });
+
+const { createProxyMiddleware } = require('http-proxy-middleware');
+app.use(
+  '/keycloak',
+  createProxyMiddleware({
+    target: process.env.KEYCLOAK_URL || 'http://localhost:8080',
+    changeOrigin: true,
+    pathRewrite: { '^/keycloak': '' },
+    onProxyRes: (proxyRes) => {
+      proxyRes.headers['Access-Control-Allow-Origin'] = 'http://localhost:3001';
+      proxyRes.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,DELETE,OPTIONS';
+      proxyRes.headers['Access-Control-Allow-Headers'] = 'Authorization,Content-Type';
+    },
+  })
+);
 
 // Multer setup for general uploads (artworks)
 const storage = multer.diskStorage({
@@ -324,30 +339,69 @@ app.post('/api/upload-artist-docs', keycloak.protect(), artistUpload, authPostLi
   }
 
   try {
-    // Hash ID document metadata (e.g., assume ID has extractable text or filename as proxy)
     const idPath = files.idDocument[0].path;
-    const idHash = crypto.createHash('sha256').update(idPath).digest('hex'); // Hash file path or extractable data
     const proofPath = files.proofOfWork[0].path;
     const selfiePath = files.selfie?.[0]?.path || null;
 
-    // Insert into artist_requests
-    const { rows } = await pool.query(
-      'INSERT INTO artist_requests (user_id, id_hash, proof_of_work_path, selfie_path, status) VALUES ($1, $2, $3, $4, $5) RETURNING request_id',
-      [userId, idHash, proofPath, selfiePath, 'pending']
-    );
-    const requestId = rows[0].request_id;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query(
+        'INSERT INTO artist_requests (user_id, id_document_path, proof_of_work_path, selfie_path, status, requested_at) VALUES ($1, $2, $3, $4, $5, NOW()) RETURNING request_id',
+        [userId, idPath, proofPath, selfiePath, 'pending']
+      );
+      const requestId = rows[0].request_id;
+      console.log('Inserted artist request:', { requestId, userId, idPath, status: 'pending' });
 
-    // Notify admin (email or system message)
-    const adminEmail = process.env.ADMIN_EMAIL || 'admin@example.com';
-    const emailHtml = `
-      <h1>New Artist Request</h1>
-      <p>User ${userId} submitted an artist request (ID: ${requestId}). Review ID hash: ${idHash}, portfolio: ${proofPath}.</p>
-    `;
-    await sendEmail(adminEmail, 'New Artist Verification Request', emailHtml);
+      // Verify insert
+      const { rows: verifyRows } = await client.query(
+        'SELECT request_id, user_id, status FROM artist_requests WHERE request_id = $1',
+        [requestId]
+      );
+      console.log('Verified artist request in DB:', verifyRows[0]);
 
-    res.json({ message: 'Documents uploaded—awaiting admin approval', requestId });
+      await client.query(
+        'UPDATE users SET status = $1 WHERE keycloak_id = $2',
+        ['pending_admin_review', userId]
+      );
+      console.log('Updated user status to pending_admin_review for:', userId);
+
+      await client.query('COMMIT');
+      console.log('Transaction committed for request:', requestId);
+
+      // Post-commit check
+      const { rows: postCommitRows } = await pool.query(
+        'SELECT request_id, user_id, status FROM artist_requests WHERE request_id = $1',
+        [requestId]
+      );
+      console.log('Post-commit check:', postCommitRows[0]);
+
+      const adminEmail = process.env.ADMIN_EMAIL || 'admin@example.com';
+      const emailHtml = `
+        <h1>New Artist Request</h1>
+        <p>User ${userId} submitted an artist request (ID: ${requestId}). Review portfolio: ${proofPath}.</p>
+      `;
+      try {
+        await sendEmail(adminEmail, 'New Artist Verification Request', emailHtml);
+        console.log('Admin email sent for request:', requestId);
+      } catch (emailError) {
+        console.error('Admin email failed:', emailError.message);
+        await pool.query(
+          'INSERT INTO system_logs (event_type, details) VALUES ($1, $2)',
+          ['email_failure', `Failed to notify admin for request ${requestId}: ${emailError.message}`]
+        );
+      }
+
+      res.json({ message: 'Documents uploaded—awaiting admin approval', requestId });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Upload error:', error.message, error.stack);
+      res.status(500).json({ error: 'Upload failed', details: error.message });
+    } finally {
+      client.release();
+    }
   } catch (error) {
-    console.error('Upload error:', error.message);
+    console.error('Upload error:', error.message, error.stack);
     res.status(500).json({ error: 'Upload failed', details: error.message });
   }
 });
@@ -355,22 +409,33 @@ app.post('/api/upload-artist-docs', keycloak.protect(), artistUpload, authPostLi
 // List all pending artist requests
 app.get('/api/admin/artist-requests/pending', keycloak.protect('realm:admin'), authGetLimiter, async (req, res) => {
   try {
+    // Main query
     const { rows } = await pool.query(
-      `SELECT ar.request_id, ar.user_id, ar.id_document_path, ar.proof_of_work_path, ar.selfie_path,
-              ar.requested_at, u.email, u.name
+      `SELECT ar.*, u.email, u.name
        FROM artist_requests ar
-       JOIN users u ON ar.user_id = u.keycloak_id
-       WHERE ar.status = 'pending'
+       LEFT JOIN users u ON ar.user_id = u.keycloak_id
+       WHERE LOWER(ar.status) = 'pending'
        ORDER BY ar.requested_at ASC`
     );
-    console.log('Pending artist requests:', rows.length);
+    console.log('Fetched pending artist requests:', {
+      count: rows.length,
+      requestIds: rows.map(r => r.request_id),
+      usersMissing: rows.filter(r => !r.email).map(r => r.user_id),
+      rawRows: rows
+    });
+
+    // Debug query: all rows
+    const { rows: allRows } = await pool.query(
+      `SELECT request_id, user_id, status, requested_at FROM artist_requests`
+    );
+    console.log('All artist_requests rows:', allRows);
+
     res.json(rows);
   } catch (error) {
-    console.error('Error fetching requests:', error.message);
-    res.status(500).json({ error: 'Server error' });
+    console.error('Error fetching requests:', error.message, error.stack);
+    res.status(500).json({ error: 'Server error', details: error.message });
   }
 });
-
 // Stream document file
 app.get('/api/admin/artist-requests/:requestId/file/:type', keycloak.protect('realm:admin'), authGetLimiter, async (req, res) => {
   try {
