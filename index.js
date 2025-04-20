@@ -687,8 +687,13 @@ app.get('/api/admin/artist-requests/file', authGetLimiter, async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', 'http://localhost:3001');
     res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    res.setHeader('Content-Type', 'image/png');
-    fs.createReadStream(filePath).pipe(res);
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Type');
+    const stream = require('fs').createReadStream(filePath);
+    stream.on('error', (err) => {
+      console.error('Stream error:', { filePath, error: err.message });
+      res.status(500).json({ error: 'Failed to stream file', details: err.message });
+    });
+    stream.pipe(res);
   } catch (error) {
     console.error('Error serving file:', error);
     res.status(500).json({ error: 'Server error' });
@@ -1187,7 +1192,6 @@ app.put('/api/payments/:id/status', keycloak.protect('realm:admin'), authPutLimi
   }
 });
 
-app.post('/api/payments/confirm', keycloak.protect(), orderLimiter, async (req, res) => {
 app.post('/api/payments/confirm', keycloak.protect(), orderLimiter, async (req, res) => {
   const { order_id, transaction_ref } = req.body;
   const client = await pool.connect();
