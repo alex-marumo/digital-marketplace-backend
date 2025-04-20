@@ -1,4 +1,5 @@
 const nodemailer = require('nodemailer');
+const _ = require('lodash');
 
 // Transporter unchanged
 const transporter = nodemailer.createTransport({
@@ -28,15 +29,16 @@ const sendEmail = async (to, subject, html) => {
   }
 };
 
-// Updated to send a code
+// Updated sendVerificationEmail function with input sanitization
 const sendVerificationEmail = async (user, code) => {
+  // Sanitize user input to prevent HTML injection
+  const sanitizedUserName = _.escape(user.name);
+  
   const html = `
     <h1>Welcome to Art Marketplace!</h1>
-    <p>Thanks for signing up, ${user.name}. Enter this code in the app to verify your email:</p>
+    <p>Thanks for signing up, ${sanitizedUserName}. Enter this code in the app to verify your email:</p>
     <h2>${code}</h2>
     <p>Expires in 10 minutes. Ignore if you didn’t sign up.</p>
   `;
   return sendEmail(user.email, 'Email Verification Code', html);
 };
-
-module.exports = { sendEmail, sendVerificationEmail };
