@@ -1188,6 +1188,7 @@ app.put('/api/payments/:id/status', keycloak.protect('realm:admin'), authPutLimi
 });
 
 app.post('/api/payments/confirm', keycloak.protect(), orderLimiter, async (req, res) => {
+app.post('/api/payments/confirm', keycloak.protect(), orderLimiter, async (req, res) => {
   const { order_id, transaction_ref } = req.body;
   const client = await pool.connect();
   try {
