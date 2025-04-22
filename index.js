@@ -790,6 +790,203 @@ app.put('/api/users/me', keycloak.protect(), authPutLimiter, async (req, res) =>
   }
 });
 
+app.put('/api/settings', keycloak.protect(), authPutLimiter, async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+  const { emailNotifications } = req.body;
+
+  if (typeof emailNotifications !== 'boolean') {
+    return res.status(400).json({ error: 'emailNotifications must be a boolean' });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      'UPDATE users SET email_notifications = $1 WHERE keycloak_id = $2 RETURNING user_id, email_notifications',
+      [emailNotifications, userId]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    console.log('Settings updated:', { userId, emailNotifications: rows[0].email_notifications });
+    res.json({ message: 'Settings updated', settings: rows[0] });
+  } catch (error) {
+    console.error('Settings update error:', error.message);
+    res.status(500).json({ error: 'Database error', details: error.message });
+  }
+});
+
+app.post('/api/reset-password', keycloak.protect(), authPostLimiter, async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+  const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ error: 'Email is required' });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      'SELECT email FROM users WHERE keycloak_id = $1 AND email = $2',
+      [userId, email]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'User or email not found' });
+    }
+
+    // Generate reset token
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+
+    // Store reset token in DB
+    await pool.query(
+      'INSERT INTO password_resets (user_id, token, expires_at) VALUES ($1, $2, $3)',
+      [userId, resetToken, expiresAt]
+    );
+
+    // Send reset email
+    const resetUrl = `${process.env.APP_URL}/reset-password?token=${resetToken}&userId=${userId}`;
+    const emailHtml = `
+      <h1>Password Reset Request</h1>
+      <p>Click the link below to reset your password. This link expires in 15 minutes.</p>
+      <a href="${resetUrl}">${resetUrl}</a>
+    `;
+    await sendEmail(email, 'Reset Your ARTISTIC Password', emailHtml);
+    console.log('Password reset email sent:', { userId, email });
+    res.json({ message: 'Password reset email sent' });
+  } catch (error) {
+    console.error('Reset password error:', error.message);
+    res.status(500).json({ error: 'Failed to send reset email', details: error.message });
+  }
+});
+
+app.post('/api/delete-account', keycloak.protect(), authPostLimiter, async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+
+  const client = await pool.connect();
+   try {
+    await client.query('BEGIN');
+
+    // Check if user exists and is not already deleted
+    const { rows } = await client.query(
+      'SELECT status FROM users WHERE keycloak_id = $1',
+      [userId]
+    );
+    if (rows.length === 0) {
+    return res.status(404).json({ error: 'User not found' });
+    }
+    if (rows[0].status === 'deleted') {
+      return res.status(400).json({ error: 'Account already deleted' });
+    }
+
+    // Soft delete in database
+    await client.query(
+      'UPDATE users SET status = $1, email = $2, name = $3 WHERE keycloak_id = $4',
+      ['deleted', `deleted_${userId}@example.com`, 'Deleted User', userId]
+    );
+
+    // Disable user in Keycloak
+    const adminTokenResponse = await axios.post(
+      `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
+      new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: process.env.KEYCLOAK_CLIENT_ID,
+        client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
+      }),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
+    await axios.put(
+    `${process.env.KEYCLOAK_URL}/admin/realms/${process.env.KEYCLOAK_REALM}/users/${userId}`,
+      { enabled: false },
+      {
+        headers: {
+          Authorization: `Bearer ${adminTokenResponse.data.access_token}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    await client.query('COMMIT');
+    console.log('Account deleted:', { userId });
+    res.json({ message: 'Account deleted successfully' });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Delete account error:', error.message);
+    res.status(500).json({ error: 'Failed to delete account', details: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/change-password', keycloak.protect(), authPostLimiter, async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+  const { oldPassword, newPassword } = req.body;
+
+  if (!oldPassword || !newPassword) {
+    return res.status(400).json({ error: 'Old and new passwords are required' });
+  }
+
+  try {
+    // Verify old password by attempting to get a token
+    const email = req.kauth.grant.access_token.content.email;
+    try {
+      await axios.post(
+       `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
+        new URLSearchParams({
+          grant_type: 'password',
+          client_id: process.env.KEYCLOAK_CLIENT_ID,
+          client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
+          username: email,
+          password: oldPassword,
+        }),
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+      );
+    } catch (error) {
+      console.error('Old password verification failed:', error.response?.data);
+      return res.status(401).json({ error: 'Incorrect current password' });
+    }
+
+    // Validate new password complexity
+    const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
+    if (!passwordRegex.test(newPassword)) {
+      return res.status(400).json({
+        error: 'New password must be at least 8 characters, with 1 uppercase, 1 lowercase, 1 number, and 1 special character'
+      });
+    }
+
+    // Update password in Keycloak
+    const adminTokenResponse = await axios.post(
+    `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
+      new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: process.env.KEYCLOAK_CLIENT_ID,
+        client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
+      }),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
+
+    await axios.put(
+      `${process.env.KEYCLOAK_URL}/admin/realms/${process.env.KEYCLOAK_REALM}/users/${userId}/reset-password`,
+      { type: 'password', value: newPassword, temporary: false },
+      {
+        headers: {
+          Authorization: `Bearer ${adminTokenResponse.data.access_token}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    // Log the action
+    await pool.query(
+      'INSERT INTO system_logs (event_type, user_id, details) VALUES ($1, $2, $3)',
+      ['password_change', userId, 'User changed their password']
+    );
+
+    console.log('Password changed successfully:', { userId });
+    res.json({ message: 'Password changed successfully' });
+  } catch (error) {
+    console.error('Change password error:', error.message, error.response?.data);
+    res.status(500).json({ error: 'Failed to change password', details: error.message });
+  }
+});
+
 // --- Artist Routes ---
 
 app.post('/api/artists', keycloak.protect('realm:artist'), authPostLimiter, async (req, res) => {
