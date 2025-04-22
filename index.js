@@ -878,14 +878,46 @@ app.post('/api/artworks/:id/images', keycloak.protect('realm:artist'), artworkMa
 
 app.get('/api/artworks', publicDataLimiter, async (req, res) => {
   try {
-    const { rows } = await pool.query(`
-      SELECT a.*, COALESCE(json_agg(ai.image_path) FILTER (WHERE ai.image_path IS NOT NULL), '[]') AS images
+    const { artist, category, sort_by, order } = req.query;
+    let query = `
+      SELECT a.*, 
+             COALESCE(json_agg(ai.image_path) FILTER (WHERE ai.image_path IS NOT NULL), '[]') AS images,
+             u.name AS artist_name
       FROM artworks a
       LEFT JOIN artwork_images ai ON a.artwork_id = ai.artwork_id
-      GROUP BY a.artwork_id
-    `);
+      LEFT JOIN order_items oi ON a.artwork_id = oi.artwork_id
+      LEFT JOIN orders o ON oi.order_id = o.order_id
+      LEFT JOIN payments p ON o.order_id = p.order_id
+      LEFT JOIN artists ar ON a.artist_id = ar.user_id
+      LEFT JOIN users u ON ar.user_id = u.user_id
+      WHERE (o.order_id IS NULL OR p.status != 'completed')
+    `;
+    const values = [];
+    let conditions = [];
+
+    if (artist) {
+      conditions.push(`a.artist_id = $${values.length + 1}`);
+      values.push(artist);
+    }
+    if (category) {
+      conditions.push(`a.category_id = (SELECT category_id FROM categories WHERE name = $${values.length + 1})`);
+      values.push(category);
+    }
+    if (conditions.length > 0) {
+      query += ` AND ${conditions.join(' AND ')}`;
+    }
+    query += ` GROUP BY a.artwork_id, u.name`;
+    if (sort_by) {
+      const validSortFields = ['created_at', 'price'];
+      const validOrders = ['asc', 'desc'];
+      if (validSortFields.includes(sort_by) && validOrders.includes(order || 'asc')) {
+        query += ` ORDER BY a.${sort_by} ${order || 'asc'}`;
+      }
+    }
+    const { rows } = await pool.query(query, values);
     res.json(rows);
   } catch (error) {
+    console.error('Artwork fetch error:', error.message, error.stack);
     res.status(500).json({ error: 'Database error', details: error.message });
   }
 });
@@ -991,7 +1023,10 @@ app.post('/api/search', publicDataLimiter, async (req, res) => {
       JOIN users u ON ar.user_id = u.user_id
       JOIN categories c ON a.category_id = c.category_id
       LEFT JOIN artwork_images ai ON a.artwork_id = ai.artwork_id
-      WHERE a.title ILIKE $1 OR u.name ILIKE $1 OR c.name ILIKE $1
+      LEFT JOIN orders o ON a.artwork_id = o.artwork_id
+      LEFT JOIN payments p ON o.order_id = p.order_id
+      WHERE (o.order_id IS NULL OR p.status != 'completed')
+        AND (a.title ILIKE $1 OR u.name ILIKE $1 OR c.name ILIKE $1)
       GROUP BY a.artwork_id, u.name, c.name
     `, [`%${query}%`]);
     res.json(rows);
