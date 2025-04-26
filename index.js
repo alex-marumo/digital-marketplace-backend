@@ -1245,13 +1245,24 @@ app.get('/api/artworks', publicDataLimiter, async (req, res) => {
       query += ` AND ${conditions.join(' AND ')}`;
     }
     query += ` GROUP BY a.artwork_id, u.name`;
-    if (sort_by) {
-      const validSortFields = ['created_at', 'price'];
-      const validOrders = ['asc', 'desc'];
-      if (validSortFields.includes(sort_by) && validOrders.includes(order || 'asc')) {
-        query += ` ORDER BY a.${sort_by} ${order || 'asc'}`;
+
+    // Secure ORDER BY handling
+    const sortFieldMap = {
+      created_at: 'a.created_at',
+      price: 'a.price'
+    };
+    const orderMap = {
+      asc: 'ASC',
+      desc: 'DESC'
+    };
+    if (sort_by && order) {
+      const mappedSortField = sortFieldMap[sort_by];
+      const mappedOrder = orderMap[order];
+      if (mappedSortField && mappedOrder) {
+        query += ` ORDER BY ${mappedSortField} ${mappedOrder}`;
       }
     }
+
     const { rows } = await pool.query(query, values);
     res.json(rows);
   } catch (error) {
