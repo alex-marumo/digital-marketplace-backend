@@ -137,6 +137,27 @@ const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json');
     { name: 'proofOfWork', maxCount: 1 },
   ]);
 
+  // Multer setup for profile photos
+  const profileStorage = multer.diskStorage({
+  destination: './Uploads/profiles/',
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, `${req.kauth.grant.access_token.content.sub}-${Date.now()}${ext}`);
+  },
+});
+
+const profileUpload = multer({
+  storage: profileStorage,
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB limit
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (!['.jpg', '.jpeg', '.png'].includes(ext)) {
+      return cb(new Error('Only JPG, JPEG, or PNG allowed'));
+    }
+    cb(null, true);
+  },
+}).single('profilePhoto');
+
 // --- User Routes ---
 
 app.post('/api/pre-register', registrationLimiter, async (req, res) => {
@@ -540,88 +561,129 @@ app.post('/api/admin/artist-requests/:requestId/review', keycloak.protect('realm
   const { status, rejection_reason } = req.body;
   const reviewerId = req.kauth.grant.access_token.content.sub;
 
+  console.log('📥 Review request:', { requestId, status, rejection_reason, reviewerId });
+
   if (!['approved', 'rejected'].includes(status)) {
     return res.status(400).json({ error: 'Invalid status' });
   }
-  if (status === 'rejected' && !rejection_reason) {
+  if (status === 'rejected' && !rejection_reason?.trim()) {
     return res.status(400).json({ error: 'Rejection reason required' });
   }
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    console.log('🔍 Fetching artist request:', { requestId });
     const { rows } = await client.query(
       'SELECT user_id, id_document_path, proof_of_work_path, selfie_path FROM artist_requests WHERE request_id = $1 AND status = $2',
       [requestId, 'pending']
     );
     if (!rows.length) {
+      console.log('❌ Request not found or already reviewed:', { requestId });
       return res.status(404).json({ error: 'Request not found or already reviewed' });
     }
     const { user_id: userId } = rows[0];
+    console.log('✅ Found request:', { userId });
 
+    console.log('🔄 Updating artist_requests:', { status, rejection_reason });
     await client.query(
       'UPDATE artist_requests SET status = $1, rejection_reason = $2, reviewed_by = $3, reviewed_at = CURRENT_TIMESTAMP WHERE request_id = $4',
       [status, rejection_reason || null, reviewerId, requestId]
     );
 
     if (status === 'approved') {
-      // Update user
+      console.log('🔄 Updating user to artist:', { userId });
       const { rows: userRows } = await client.query(
         'UPDATE users SET role = $1, status = $2 WHERE keycloak_id = $3 RETURNING user_id',
         ['artist', 'verified', userId]
       );
+      if (!userRows.length) throw new Error('User not found in users table');
       const dbUserId = userRows[0].user_id;
+      console.log('✅ Updated user:', { dbUserId });
 
-      // Insert into artists table
+      console.log('🔄 Inserting into artists table:', { dbUserId });
       await client.query(
         'INSERT INTO artists (user_id, bio, portfolio) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO NOTHING',
         [dbUserId, '', '']
       );
 
-      // Sync Keycloak
-      const adminTokenResponse = await axios.post(
-        `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
-        new URLSearchParams({
-          grant_type: 'client_credentials',
-          client_id: process.env.KEYCLOAK_CLIENT_ID,
-          client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
-        }),
-        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-      );
-      const adminToken = adminTokenResponse.data.access_token;
+      try {
+        console.log('🔄 Fetching Keycloak admin token');
+        const adminTokenResponse = await axios.post(
+          `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
+          new URLSearchParams({
+            grant_type: 'client_credentials',
+            client_id: process.env.KEYCLOAK_CLIENT_ID,
+            client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
+          }),
+          { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+        );
+        const adminToken = adminTokenResponse.data.access_token;
+        if (!adminToken) throw new Error('No admin token received');
+        console.log('✅ Admin token received');
 
-      const rolesResponse = await axios.get(
-        `${process.env.KEYCLOAK_URL}/admin/realms/${process.env.KEYCLOAK_REALM}/roles`,
-        { headers: { Authorization: `Bearer ${adminToken}` } }
-      );
-      const artistRole = rolesResponse.data.find(r => r.name === 'artist');
-      if (!artistRole) throw new Error('Artist role not found in Keycloak');
+        console.log('🔄 Fetching Keycloak roles');
+        const rolesResponse = await axios.get(
+          `${process.env.KEYCLOAK_URL}/admin/realms/${process.env.KEYCLOAK_REALM}/roles`,
+          { headers: { Authorization: `Bearer ${adminToken}` } }
+        );
+        const artistRole = rolesResponse.data.find(r => r.name === 'artist');
+        if (!artistRole) throw new Error('Artist role not found in Keycloak');
+        console.log('✅ Found artist role:', artistRole);
 
-      await axios.post(
-        `${process.env.KEYCLOAK_URL}/admin/realms/${process.env.KEYCLOAK_REALM}/users/${userId}/role-mappings/realm`,
-        [{ id: artistRole.id, name: artistRole.name }],
-        {
-          headers: {
-            Authorization: `Bearer ${adminToken}`,
-            'Content-Type': 'application/json',
-          },
+        console.log('🔄 Assigning artist role in Keycloak:', { userId });
+        await axios.post(
+          `${process.env.KEYCLOAK_URL}/admin/realms/${process.env.KEYCLOAK_REALM}/users/${userId}/role-mappings/realm`,
+          [{ id: artistRole.id, name: artistRole.name }],
+          {
+            headers: {
+              Authorization: `Bearer ${adminToken}`,
+              'Content-Type': 'application/json',
+            },
+          }
+        );
+        console.log('✅ Artist role assigned');
+      } catch (keycloakError) {
+        console.error('⚠️ Keycloak error (continuing):', keycloakError.message);
+        try {
+          await pool.query(
+            'INSERT INTO system_logs (event_type, details) VALUES ($1, $2)',
+            ['keycloak_failure', `Failed to assign artist role for user ${userId}: ${keycloakError.message}`]
+          );
+        } catch (logError) {
+          console.error('⚠️ Failed to log Keycloak error:', logError.message);
         }
-      );
+      }
     }
 
-    // Notify artist
+    console.log('📧 Fetching user for notification:', { userId });
     const { rows: userRows } = await client.query('SELECT email, name FROM users WHERE keycloak_id = $1', [userId]);
+    if (!userRows.length) throw new Error('User not found for notification');
     const emailHtml = status === 'approved'
       ? `<h1>Artist Verification Approved!</h1><p>Congratulations, ${userRows[0].name}! You’re now an approved artist. Start uploading your artworks!</p>`
       : `<h1>Artist Verification Rejected</h1><p>Sorry, ${userRows[0].name}. Your request was rejected. Reason: ${rejection_reason}. Please resubmit or contact support.</p>`;
-    await sendEmail(userRows[0].email, `Artist Verification ${status.charAt(0).toUpperCase() + status.slice(1)}`, emailHtml);
+    try {
+      console.log('📧 Sending email to:', userRows[0].email);
+      await sendEmail(userRows[0].email, `Artist Verification ${status.charAt(0).toUpperCase() + status.slice(1)}`, emailHtml);
+      console.log('✅ Email sent');
+    } catch (emailError) {
+      console.error('⚠️ Email sending failed:', emailError.message);
+      try {
+        await pool.query(
+          'INSERT INTO system_logs (event_type, details) VALUES ($1, $2)',
+          ['email_failure', `Failed to send review notification for request ${requestId}: ${emailError.message}`]
+        );
+      } catch (logError) {
+        console.error('⚠️ Failed to log email error:', logError.message);
+      }
+    }
 
     await client.query('COMMIT');
-    console.log(`Request ${requestId} ${status} by ${reviewerId}`);
+    console.log(`✅ Request ${requestId} ${status} by ${reviewerId}`);
     res.json({ message: `Request ${status}` });
   } catch (error) {
     await client.query('ROLLBACK');
-    console.error('Review error:', error.message);
+    console.error('❌ Review error:', error.message, error.stack);
     res.status(500).json({ error: 'Review failed', details: error.message });
   } finally {
     client.release();
@@ -726,7 +788,7 @@ app.get('/api/users/me', keycloak.protect(), authGetLimiter, async (req, res) =>
     const keycloakId = req.kauth.grant.access_token.content.sub;
     const emailVerified = req.kauth.grant.access_token.content.email_verified || false;
     const { rows } = await pool.query(
-      'SELECT user_id, name, email, role, is_verified, trust_level, status FROM users WHERE keycloak_id = $1',
+      'SELECT user_id, name, email, role, is_verified, trust_level, status, profile_photo FROM users WHERE keycloak_id = $1',
       [keycloakId]
     );
 
@@ -787,6 +849,282 @@ app.put('/api/users/me', keycloak.protect(), authPutLimiter, async (req, res) =>
   } catch (error) {
     console.error('Update User Error:', error);
     res.status(500).json({ error: 'Database error', details: error.message });
+  }
+});
+
+// Profile Photo Upload
+app.post('/api/users/me/photo', keycloak.protect(), authPostLimiter, profileUpload, async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+  if (!req.file) {
+    return res.status(400).json({ error: 'No photo uploaded' });
+  }
+  try {
+    const photoPath = req.file.path.replace(/\\/g, '/');
+    const { rows } = await pool.query(
+      'UPDATE users SET profile_photo = $1 WHERE keycloak_id = $2 RETURNING user_id, profile_photo',
+      [photoPath, userId]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    // Return full URL for frontend
+    const photoUrl = `http://localhost:3000/api/users/${userId}/photo`;
+    res.json({ message: 'Profile photo uploaded', pictureUrl: photoUrl });
+  } catch (error) {
+    console.error('Profile photo upload error:', error.message);
+    res.status(500).json({ error: 'Upload failed', details: error.message });
+  }
+});
+
+// Profile Update 
+app.put('/api/profile', keycloak.protect(), authPutLimiter, async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+  const { name, email } = req.body;
+  try {
+    let query = 'UPDATE users SET';
+    const values = [];
+    if (name) {
+      values.push(name);
+      query += ` name = $${values.length},`;
+    }
+    if (email) {
+      values.push(email);
+      query += ` email = $${values.length},`;
+    }
+    query = query.slice(0, -1) + ` WHERE keycloak_id = $${values.length + 1} RETURNING user_id, name, email, profile_photo`;
+    values.push(userId);
+    const { rows } = await pool.query(query, values);
+    if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    const user = rows[0];
+    user.pictureUrl = user.profile_photo ? `http://localhost:3000/api/users/${userId}/photo` : null;
+    res.json({ message: 'Profile updated', user });
+  } catch (error) {
+    console.error('Update User Error:', error);
+    res.status(500).json({ error: 'Database error', details: error.message });
+  }
+});
+
+app.get('/api/users/:userId/photo', publicDataLimiter, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { rows } = await pool.query(
+      'SELECT profile_photo FROM users WHERE keycloak_id = $1 AND status != $2',
+      [userId, 'deleted']
+    );
+    if (!rows.length || !rows[0].profile_photo) {
+      return res.status(404).json({ error: 'Photo not found' });
+    }
+
+    const filePath = path.resolve(__dirname, rows[0].profile_photo);
+    await fs.access(filePath, fs.constants.R_OK);
+    res.setHeader('Content-Type', mime.lookup(filePath) || 'image/jpeg');
+    res.setHeader('Access-Control-Allow-Origin', 'http://localhost:3001');
+    const stream = require('fs').createReadStream(filePath);
+    stream.on('error', (err) => {
+      console.error('Stream error:', { filePath, error: err.message });
+      res.status(500).json({ error: 'Failed to stream photo' });
+    });
+    stream.pipe(res);
+  } catch (error) {
+    console.error('Serve photo error:', error.message);
+    res.status(500).json({ error: 'Server error', details: error.message });
+  }
+});
+
+app.put('/api/settings', keycloak.protect(), authPutLimiter, async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+  const { emailNotifications } = req.body;
+
+  if (typeof emailNotifications !== 'boolean') {
+    return res.status(400).json({ error: 'emailNotifications must be a boolean' });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      'UPDATE users SET email_notifications = $1 WHERE keycloak_id = $2 RETURNING user_id, email_notifications',
+      [emailNotifications, userId]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    console.log('Settings updated:', { userId, emailNotifications: rows[0].email_notifications });
+    res.json({ message: 'Settings updated', settings: rows[0] });
+  } catch (error) {
+    console.error('Settings update error:', error.message);
+    res.status(500).json({ error: 'Database error', details: error.message });
+  }
+});
+
+app.post('/api/reset-password', keycloak.protect(), authPostLimiter, async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+  const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ error: 'Email is required' });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      'SELECT email FROM users WHERE keycloak_id = $1 AND email = $2',
+      [userId, email]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'User or email not found' });
+    }
+
+    // Generate reset token
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+
+    // Store reset token in DB
+    await pool.query(
+      'INSERT INTO password_resets (user_id, token, expires_at) VALUES ($1, $2, $3)',
+      [userId, resetToken, expiresAt]
+    );
+
+    // Send reset email
+    const resetUrl = `${process.env.APP_URL}/reset-password?token=${resetToken}&userId=${userId}`;
+    const emailHtml = `
+      <h1>Password Reset Request</h1>
+      <p>Click the link below to reset your password. This link expires in 15 minutes.</p>
+      <a href="${resetUrl}">${resetUrl}</a>
+    `;
+    await sendEmail(email, 'Reset Your ARTISTIC Password', emailHtml);
+    console.log('Password reset email sent:', { userId, email });
+    res.json({ message: 'Password reset email sent' });
+  } catch (error) {
+    console.error('Reset password error:', error.message);
+    res.status(500).json({ error: 'Failed to send reset email', details: error.message });
+  }
+});
+
+app.post('/api/delete-account', keycloak.protect(), authPostLimiter, async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+
+  const client = await pool.connect();
+   try {
+    await client.query('BEGIN');
+
+    // Check if user exists and is not already deleted
+    const { rows } = await client.query(
+      'SELECT status FROM users WHERE keycloak_id = $1',
+      [userId]
+    );
+    if (rows.length === 0) {
+    return res.status(404).json({ error: 'User not found' });
+    }
+    if (rows[0].status === 'deleted') {
+      return res.status(400).json({ error: 'Account already deleted' });
+    }
+
+    // Soft delete in database
+    await client.query(
+      'UPDATE users SET status = $1, email = $2, name = $3 WHERE keycloak_id = $4',
+      ['deleted', `deleted_${userId}@example.com`, 'Deleted User', userId]
+    );
+
+    // Disable user in Keycloak
+    const adminTokenResponse = await axios.post(
+      `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
+      new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: process.env.KEYCLOAK_CLIENT_ID,
+        client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
+      }),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
+    await axios.put(
+    `${process.env.KEYCLOAK_URL}/admin/realms/${process.env.KEYCLOAK_REALM}/users/${userId}`,
+      { enabled: false },
+      {
+        headers: {
+          Authorization: `Bearer ${adminTokenResponse.data.access_token}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    await client.query('COMMIT');
+    console.log('Account deleted:', { userId });
+    res.json({ message: 'Account deleted successfully' });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Delete account error:', error.message);
+    res.status(500).json({ error: 'Failed to delete account', details: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/change-password', keycloak.protect(), authPostLimiter, async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+  const { oldPassword, newPassword } = req.body;
+
+  if (!oldPassword || !newPassword) {
+    return res.status(400).json({ error: 'Old and new passwords are required' });
+  }
+
+  try {
+    // Verify old password by attempting to get a token
+    const email = req.kauth.grant.access_token.content.email;
+    try {
+      await axios.post(
+       `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
+        new URLSearchParams({
+          grant_type: 'password',
+          client_id: process.env.KEYCLOAK_CLIENT_ID,
+          client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
+          username: email,
+          password: oldPassword,
+        }),
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+      );
+    } catch (error) {
+      console.error('Old password verification failed:', error.response?.data);
+      return res.status(401).json({ error: 'Incorrect current password' });
+    }
+
+    // Validate new password complexity
+    const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
+    if (!passwordRegex.test(newPassword)) {
+      return res.status(400).json({
+        error: 'New password must be at least 8 characters, with 1 uppercase, 1 lowercase, 1 number, and 1 special character'
+      });
+    }
+
+    // Update password in Keycloak
+    const adminTokenResponse = await axios.post(
+    `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
+      new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: process.env.KEYCLOAK_CLIENT_ID,
+        client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
+      }),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
+
+    await axios.put(
+      `${process.env.KEYCLOAK_URL}/admin/realms/${process.env.KEYCLOAK_REALM}/users/${userId}/reset-password`,
+      { type: 'password', value: newPassword, temporary: false },
+      {
+        headers: {
+          Authorization: `Bearer ${adminTokenResponse.data.access_token}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    // Log the action
+    await pool.query(
+      'INSERT INTO system_logs (event_type, user_id, details) VALUES ($1, $2, $3)',
+      ['password_change', userId, 'User changed their password']
+    );
+
+    console.log('Password changed successfully:', { userId });
+    res.json({ message: 'Password changed successfully' });
+  } catch (error) {
+    console.error('Change password error:', error.message, error.response?.data);
+    res.status(500).json({ error: 'Failed to change password', details: error.message });
   }
 });
 
@@ -878,14 +1216,57 @@ app.post('/api/artworks/:id/images', keycloak.protect('realm:artist'), artworkMa
 
 app.get('/api/artworks', publicDataLimiter, async (req, res) => {
   try {
-    const { rows } = await pool.query(`
-      SELECT a.*, COALESCE(json_agg(ai.image_path) FILTER (WHERE ai.image_path IS NOT NULL), '[]') AS images
+    const { artist, category, sort_by, order } = req.query;
+    let query = `
+      SELECT a.*, 
+             COALESCE(json_agg(ai.image_path) FILTER (WHERE ai.image_path IS NOT NULL), '[]') AS images,
+             u.name AS artist_name
       FROM artworks a
       LEFT JOIN artwork_images ai ON a.artwork_id = ai.artwork_id
-      GROUP BY a.artwork_id
-    `);
+      LEFT JOIN order_items oi ON a.artwork_id = oi.artwork_id
+      LEFT JOIN orders o ON oi.order_id = o.order_id
+      LEFT JOIN payments p ON o.order_id = p.order_id
+      LEFT JOIN artists ar ON a.artist_id = ar.user_id
+      LEFT JOIN users u ON ar.user_id = u.user_id
+      WHERE (o.order_id IS NULL OR p.status != 'completed')
+    `;
+    const values = [];
+    let conditions = [];
+
+    if (artist) {
+      conditions.push(`a.artist_id = $${values.length + 1}`);
+      values.push(artist);
+    }
+    if (category) {
+      conditions.push(`a.category_id = (SELECT category_id FROM categories WHERE name = $${values.length + 1})`);
+      values.push(category);
+    }
+    if (conditions.length > 0) {
+      query += ` AND ${conditions.join(' AND ')}`;
+    }
+    query += ` GROUP BY a.artwork_id, u.name`;
+
+    // Secure ORDER BY handling
+    const sortFieldMap = {
+      created_at: 'a.created_at',
+      price: 'a.price'
+    };
+    const orderMap = {
+      asc: 'ASC',
+      desc: 'DESC'
+    };
+    if (sort_by && order) {
+      const mappedSortField = sortFieldMap[sort_by];
+      const mappedOrder = orderMap[order];
+      if (mappedSortField && mappedOrder) {
+        query += ` ORDER BY ${mappedSortField} ${mappedOrder}`;
+      }
+    }
+
+    const { rows } = await pool.query(query, values);
     res.json(rows);
   } catch (error) {
+    console.error('Artwork fetch error:', error.message, error.stack);
     res.status(500).json({ error: 'Database error', details: error.message });
   }
 });
@@ -991,7 +1372,10 @@ app.post('/api/search', publicDataLimiter, async (req, res) => {
       JOIN users u ON ar.user_id = u.user_id
       JOIN categories c ON a.category_id = c.category_id
       LEFT JOIN artwork_images ai ON a.artwork_id = ai.artwork_id
-      WHERE a.title ILIKE $1 OR u.name ILIKE $1 OR c.name ILIKE $1
+      LEFT JOIN orders o ON a.artwork_id = o.artwork_id
+      LEFT JOIN payments p ON o.order_id = p.order_id
+      WHERE (o.order_id IS NULL OR p.status != 'completed')
+        AND (a.title ILIKE $1 OR u.name ILIKE $1 OR c.name ILIKE $1)
       GROUP BY a.artwork_id, u.name, c.name
     `, [`%${query}%`]);
     res.json(rows);

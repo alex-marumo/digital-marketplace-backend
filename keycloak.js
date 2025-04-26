@@ -17,17 +17,17 @@ const sessionStore = new PostgreSqlStore({
 console.log('Session store initialized:', sessionStore);
 
 const keycloak = new Keycloak({
-  store: sessionStore // Use Postgres store here
+  store: sessionStore
 }, {
-  realm: process.env.KEYCLOAK_REALM,
-  'auth-server-url': process.env.KEYCLOAK_URL,
+  realm: process.env.KEYCLOAK_REALM || 'art-marketplace-realm',
+  'auth-server-url': process.env.KEYCLOAK_URL || 'http://localhost:8080/',
   'ssl-required': 'external',
-  resource: process.env.KEYCLOAK_CLIENT_ID,
+  resource: process.env.KEYCLOAK_CLIENT_ID || 'your-client-id',
   credentials: {
-    secret: process.env.KEYCLOAK_CLIENT_SECRET
+    secret: process.env.KEYCLOAK_CLIENT_SECRET || 'your-client-secret'
   },
   'confidential-port': 0,
-  'policy-enforcer': {}
+  bearerOnly: true // Prevents redirects, returns 401
 });
 
 keycloak.verifyToken = async (token) => {
