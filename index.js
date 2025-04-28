@@ -64,15 +64,17 @@ const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json');
   app.use(bodyParser.json());
 
   app.use(session({
-    store: sessionStore,
-    secret: process.env.SESSION_SECRET || "your-secret-here",
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      secure: process.env.NODE_ENV === 'production',
-      maxAge: 24 * 60 * 60 * 1000 // 24 hours
-    }
-  }));
+  store: sessionStore,
+  secret: process.env.SESSION_SECRET || "your-secret-here",
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 24 * 60 * 60 * 1000,
+    httpOnly: true, // Add for security
+    sameSite: 'lax' // Ensure cookies are sent in cross-origin requests
+  }
+}));
 
   app.use((req, res, next) => {
     console.log('Session exists pre-Keycloak:', !!req.session);
