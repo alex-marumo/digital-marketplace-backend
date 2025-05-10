@@ -23,7 +23,7 @@ const { createVerificationCode, verifyCode } = require('./services/verificationS
 const { verifyRecaptcha } = require('./services/recaptchaService');
 const fs = require('fs');
 const fsPromises = fs.promises; // Switch to promises for async handling
-
+const router = express.Router();
 
 const { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter } = require('./middleware/rateLimiter');
 console.log('Rate Limiters:', { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter });
@@ -36,6 +36,12 @@ if (process.env.NODE_ENV === 'development') {
     secret: process.env.KEYCLOAK_CLIENT_SECRET ? '****' : 'MISSING'
   });
 }
+
+// UUID validation
+const isValidUUID = (str) => {
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  return uuidRegex.test(str);
+};
 
 const { requireTrustLevel } = require('./middleware/trustLevel');
 const { TRUST_LEVELS, updateTrustLevel, updateUserTrustAfterOrder } = require('./services/trustService');
@@ -786,6 +792,8 @@ app.post('/api/resend-verification-code', registrationLimiter, async (req, res) 
 });
 
 app.get('/api/users/me', keycloak.protect(), authGetLimiter, async (req, res) => {
+  const keycloakId = req.kauth.grant.access_token.content.sub;
+  console.log('Keycloak ID from token:', keycloakId);
   try {
     const keycloakId = req.kauth.grant.access_token.content.sub;
     const emailVerified = req.kauth.grant.access_token.content.email_verified || false;
@@ -1675,19 +1683,139 @@ app.get('/api/reviews/:artwork_id', publicDataLimiter, async (req, res) => {
 
 // --- Message Routes ---
 
-app.post('/api/messages', keycloak.protect(), messageLimiter, async (req, res) => {
+// Get user threads
+router.get('/threads', keycloak.protect(), messageLimiter, async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
-  const { receiver_id, content } = req.body;
+  if (!isValidUUID(userId)) {
+    return res.status(400).json({ error: 'Invalid user ID format' });
+  }
   try {
-    const { rows } = await pool.query(
-      'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3) RETURNING *',
-      [userId, receiver_id, content]
+    const result = await pool.query(
+      `
+      SELECT t.id, t.participant_id, t.artwork_id, u.name AS username, u.role, a.title AS artwork_title,
+             (SELECT content FROM messages m WHERE m.thread_id = t.id ORDER BY created_at DESC LIMIT 1) as last_message
+      FROM threads t
+      JOIN users u ON u.keycloak_id = t.participant_id
+      LEFT JOIN artworks a ON a.artwork_id = t.artwork_id
+      WHERE t.user_id = $1 OR t.participant_id = $1
+      ORDER BY t.created_at DESC
+      `,
+      [userId]
     );
-    res.status(201).json(rows[0]);
+    res.json(result.rows);
   } catch (error) {
-    res.status(500).json({ error: 'Database error', details: error.message });
+    console.error('Fetch threads error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch threads', details: error.message });
   }
 });
+
+// Create a new thread
+router.post('/threads', keycloak.protect(), messageLimiter, async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+  const { artworkId } = req.body;
+  if (!isValidUUID(userId) || isNaN(artworkId)) {
+    return res.status(400).json({ error: 'Invalid user ID or artwork ID format' });
+  }
+  try {
+    // Get artist for the artwork
+    const { rows: artwork } = await pool.query(
+      'SELECT artist_id FROM artworks WHERE artwork_id = $1',
+      [artworkId]
+    );
+    if (artwork.length === 0) {
+      return res.status(404).json({ error: 'Artwork not found' });
+    }
+    const recipientId = artwork[0].artist_id;
+    if (recipientId === userId) {
+      return res.status(400).json({ error: 'Cannot create thread with yourself' });
+    }
+    const result = await pool.query(
+      `
+      INSERT INTO threads (user_id, participant_id, artwork_id)
+      VALUES ($1, $2, $3)
+      ON CONFLICT ON CONSTRAINT threads_user_id_participant_id_artwork_id_key DO NOTHING
+      RETURNING *
+      `,
+      [userId, recipientId, artworkId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(400).json({ error: 'Thread already exists for this artwork' });
+    }
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('Create thread error:', error.message);
+    res.status(500).json({ error: 'Failed to create thread', details: error.message });
+  }
+});
+
+// Get messages for a thread
+router.get('/threads/:threadId/messages', keycloak.protect(), messageLimiter, async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+  const { threadId } = req.params;
+  if (!isValidUUID(userId) || isNaN(threadId)) {
+    return res.status(400).json({ error: 'Invalid user ID or thread ID format' });
+  }
+  try {
+    const threadCheck = await pool.query(
+      'SELECT * FROM threads WHERE id = $1 AND (user_id = $2 OR participant_id = $2)',
+      [threadId, userId]
+    );
+    if (threadCheck.rows.length === 0) {
+      return res.status(403).json({ error: 'Unauthorized access to thread' });
+    }
+    const result = await pool.query(
+      `
+      SELECT m.id, m.content, m.created_at, m.sender_id, u.name AS username
+      FROM messages m
+      JOIN users u ON u.keycloak_id = m.sender_id
+      WHERE m.thread_id = $1
+      ORDER BY m.created_at ASC
+      `,
+      [threadId]
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Fetch messages error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
+  }
+});
+
+// Send a message
+router.post('/threads/:threadId/messages', keycloak.protect(), messageLimiter, async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+  const { threadId } = req.params;
+  const { content } = req.body;
+  if (!isValidUUID(userId) || isNaN(threadId)) {
+    return res.status(400).json({ error: 'Invalid user ID or thread ID format' });
+  }
+  if (!content || !content.trim()) {
+    return res.status(400).json({ error: 'Message content cannot be empty' });
+  }
+  try {
+    const threadCheck = await pool.query(
+      'SELECT * FROM threads WHERE id = $1 AND (user_id = $2 OR participant_id = $2)',
+      [threadId, userId]
+    );
+    if (threadCheck.rows.length === 0) {
+      return res.status(403).json({ error: 'Unauthorized access to thread' });
+    }
+    const result = await pool.query(
+      `
+      INSERT INTO messages (thread_id, sender_id, content)
+      VALUES ($1, $2, $3)
+      RETURNING *
+      `,
+      [threadId, userId, content]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('Send message error:', error.message);
+    res.status(500).json({ error: 'Failed to send message', details: error.message });
+  }
+});
+
+// Mount the router
+app.use('/api', router);
 
 // --- PayPal Callback ---
 
