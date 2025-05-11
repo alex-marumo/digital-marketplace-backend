@@ -90,6 +90,8 @@ const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json');
 
   app.use(keycloak.middleware());
 
+  app.use('/uploads', express.static(path.join(__dirname, 'Uploads')));
+  
   app.get('/test-session', publicDataLimiter, (req, res) => {
     console.log('Test route - req.session:', req.session);
     res.json({ session: req.session ? 'alive' : 'dead', test: req.session?.test });
@@ -112,7 +114,7 @@ const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json');
 
   // Multer setup for general uploads (artworks)
   const storage = multer.diskStorage({
-    destination: './Uploads/',
+    destination: './Uploads/artworks',
     filename: (req, file, cb) => {
       cb(null, `${Date.now()}${path.extname(file.originalname)}`);
     },
@@ -1195,17 +1197,58 @@ app.put('/api/artists/:id', keycloak.protect('realm:artist'), authPutLimiter, as
 // --- Artwork Routes ---
 
 app.post('/api/artworks', keycloak.protect('realm:artist'), artworkManagementLimiter, upload.single('image'), async (req, res) => {
-  const userId = req.kauth.grant.access_token.content.sub;
+  const keycloakId = req.kauth.grant.access_token.content.sub;
   const { title, description, price, category_id } = req.body;
   try {
-    await validateCategory(category_id);
+    console.log('Processing artwork creation:', { keycloakId, title, category_id, hasFile: !!req.file });
+
+    // Fetch user_id (integer) from users table using keycloak_id (UUID)
+    const { rows: userRows } = await pool.query('SELECT user_id FROM users WHERE keycloak_id = $1', [keycloakId]);
+    if (userRows.length === 0) {
+      console.error('User not found for keycloak_id:', keycloakId);
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const artist_id = userRows[0].user_id;
+    console.log('Mapped keycloak_id to artist_id:', { keycloakId, artist_id });
+
+    // Validate required fields
+    if (!title || !price || !category_id) {
+      console.error('Missing required fields:', { title, price, category_id });
+      return res.status(400).json({ error: 'Missing required fields: title, price, or category_id' });
+    }
+
+    // Validate category_id
+    const parsedCategoryId = await validateCategory(category_id);
+
+    // Validate image
+    console.log('Validating image:', { file: req.file });
     const imagePath = validateImage(req.file);
-    const artwork = await insertArtwork(title, description, price, userId, category_id);
+    console.log('Image validated:', { imagePath });
+
+    // Insert artwork with artist_id (integer)
+    console.log('Inserting artwork:', { title, description, price, artist_id, category_id: parsedCategoryId });
+    const artwork = await insertArtwork(title, description, price, artist_id, parsedCategoryId);
+    console.log('Artwork inserted:', { artwork_id: artwork.artwork_id });
+
+    // Insert image
+    console.log('Inserting artwork image:', { artwork_id: artwork.artwork_id, imagePath });
     await insertArtworkImage(artwork.artwork_id, imagePath);
+    console.log('Artwork image inserted');
+
     res.status(201).json(artwork);
   } catch (error) {
-    console.error('Database error:', error.message);
-    res.status(500).json({ error: 'Database error', details: error.message });
+    console.error('Artwork creation error:', {
+      keycloakId,
+      category_id,
+      title,
+      hasFile: !!req.file,
+      message: error.message,
+      stack: error.stack,
+    });
+    res.status(error.message.includes('Invalid category ID') ? 400 : 500).json({
+      error: 'Failed to create artwork',
+      details: error.message,
+    });
   }
 });
 
@@ -1224,60 +1267,76 @@ app.post('/api/artworks/:id/images', keycloak.protect('realm:artist'), artworkMa
   }
 });
 
-app.get('/api/artworks', publicDataLimiter, async (req, res) => {
+app.get('/api/artworks', keycloak.protect(), publicDataLimiter, async (req, res) => {
+  const { artist, category, sort_by = 'created_at', order = 'desc' } = req.query;
   try {
-    const { artist, category, sort_by, order } = req.query;
+    console.log('Fetching artworks:', { artist, category, sort_by, order });
+
+    const params = [];
     let query = `
-      SELECT a.*, 
-             COALESCE(json_agg(ai.image_path) FILTER (WHERE ai.image_path IS NOT NULL), '[]') AS images,
-             u.name AS artist_name
+      SELECT a.*, c.name AS category_name, 
+             '/uploads/artworks/' || SPLIT_PART(ai.image_path, '/', -1) AS image_url
       FROM artworks a
+      JOIN categories c ON a.category_id = c.category_id
       LEFT JOIN artwork_images ai ON a.artwork_id = ai.artwork_id
-      LEFT JOIN order_items oi ON a.artwork_id = oi.artwork_id
-      LEFT JOIN orders o ON oi.order_id = o.order_id
-      LEFT JOIN payments p ON o.order_id = p.order_id
-      LEFT JOIN artists ar ON a.artist_id = ar.user_id
-      LEFT JOIN users u ON ar.user_id = u.user_id
-      WHERE (o.order_id IS NULL OR p.status != 'completed')
     `;
-    const values = [];
     let conditions = [];
 
-    if (artist) {
-      conditions.push(`a.artist_id = $${values.length + 1}`);
-      values.push(artist);
-    }
-    if (category) {
-      conditions.push(`a.category_id = (SELECT category_id FROM categories WHERE name = $${values.length + 1})`);
-      values.push(category);
-    }
-    if (conditions.length > 0) {
-      query += ` AND ${conditions.join(' AND ')}`;
-    }
-    query += ` GROUP BY a.artwork_id, u.name`;
-
-    // Secure ORDER BY handling
-    const sortFieldMap = {
-      created_at: 'a.created_at',
-      price: 'a.price'
-    };
-    const orderMap = {
-      asc: 'ASC',
-      desc: 'DESC'
-    };
-    if (sort_by && order) {
-      const mappedSortField = sortFieldMap[sort_by];
-      const mappedOrder = orderMap[order];
-      if (mappedSortField && mappedOrder) {
-        query += ` ORDER BY ${mappedSortField} ${mappedOrder}`;
+    if (artist && artist !== 'undefined') {
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidRegex.test(artist)) {
+        console.error('Invalid artist keycloak_id format:', artist);
+        return res.status(400).json({ error: 'Invalid artist ID format' });
       }
+      const { rows: userRows } = await pool.query('SELECT user_id FROM users WHERE keycloak_id = $1', [artist]);
+      if (userRows.length === 0) {
+        console.error('Artist not found:', artist);
+        return res.status(404).json({ error: 'Artist not found' });
+      }
+      conditions.push(`a.artist_id = $${params.length + 1}`);
+      params.push(userRows[0].user_id);
     }
 
-    const { rows } = await pool.query(query, values);
+    if (category && category !== 'undefined') {
+      const parsedCategoryId = parseInt(category);
+      if (isNaN(parsedCategoryId)) {
+        console.error('Invalid category_id:', category);
+        return res.status(400).json({ error: 'Invalid category ID' });
+      }
+      const { rows: categoryRows } = await pool.query('SELECT category_id FROM categories WHERE category_id = $1', [parsedCategoryId]);
+      if (categoryRows.length === 0) {
+        console.error('Category not found:', parsedCategoryId);
+        return res.status(400).json({ error: 'Category not found' });
+      }
+      conditions.push(`a.category_id = $${params.length + 1}`);
+      params.push(parsedCategoryId);
+    }
+
+    if (conditions.length > 0) {
+      query += ' WHERE ' + conditions.join(' AND ');
+    }
+
+    const validSortFields = ['created_at', 'price', 'category_id'];
+    const validOrders = ['asc', 'desc'];
+    const safeSortBy = validSortFields.includes(sort_by) ? sort_by : 'created_at';
+    const safeOrder = validOrders.includes(order) ? order : 'desc';
+    query += ` ORDER BY a.${safeSortBy} ${safeOrder}`;
+
+    console.log('Executing query:', { query, params });
+    const { rows } = await pool.query(query, params);
+    console.log('Artworks fetched:', { count: rows.length });
+
     res.json(rows);
   } catch (error) {
-    console.error('Artwork fetch error:', error.message, error.stack);
-    res.status(500).json({ error: 'Database error', details: error.message });
+    console.error('Artwork fetch error:', {
+      artist,
+      category,
+      sort_by,
+      order,
+      message: error.message,
+      stack: error.stack,
+    });
+    res.status(500).json({ error: 'Failed to fetch artworks', details: error.message });
   }
 });
 
@@ -1346,10 +1405,15 @@ app.post('/api/categories', keycloak.protect('realm:admin'), authPostLimiter, as
 
 app.get('/api/categories', publicDataLimiter, async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM categories');
+    const { rows } = await pool.query('SELECT category_id, name, description FROM categories ORDER BY name');
+    console.log(`Fetched ${rows.length} categories:`, rows.map(r => r.name));
     res.json(rows);
   } catch (error) {
-    res.status(500).json({ error: 'Database error', details: error.message });
+    console.error('Category fetch error:', {
+      message: error.message,
+      stack: error.stack,
+    });
+    res.status(500).json({ error: 'Failed to fetch categories', details: error.message });
   }
 });
 
@@ -1412,12 +1476,58 @@ app.post('/api/orders', keycloak.protect('realm:buyer'), orderLimiter, requireTr
 });
 
 app.get('/api/orders', keycloak.protect(), authGetLimiter, async (req, res) => {
-  const userId = req.kauth.grant.access_token.content.sub;
+  const userId = req.kauth?.grant?.access_token?.content?.sub;
+  if (!userId) {
+    console.error('No user ID in Keycloak token');
+    return res.status(401).json({ error: 'Unauthorized: Invalid token' });
+  }
+
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
+  const offset = (page - 1) * limit;
+
   try {
-    const { rows } = await pool.query('SELECT * FROM orders WHERE buyer_id = $1', [userId]);
-    res.json(rows);
+    // Verify DB connection
+    await pool.query('SELECT 1');
+    console.log('DB connection OK');
+
+    // Query with order_items bridge
+    const { rows } = await pool.query(`
+      SELECT 
+        o.order_id, 
+        o.total_amount AS price, 
+        o.status, 
+        STRING_AGG(COALESCE(a.title, 'Unknown Artwork'), ', ') AS artwork_title
+      FROM orders o
+      LEFT JOIN order_items oi ON o.order_id = oi.order_id
+      LEFT JOIN artworks a ON oi.artwork_id = a.artwork_id
+      WHERE o.buyer_id = (
+        SELECT user_id FROM users WHERE keycloak_id = $1
+      )
+      GROUP BY o.order_id, o.total_amount, o.status
+      ORDER BY o.created_at DESC
+      LIMIT $2 OFFSET $3
+    `, [userId, limit, offset]);
+
+    const { rows: countRows } = await pool.query(
+      'SELECT COUNT(*) FROM orders WHERE buyer_id = (SELECT user_id FROM users WHERE keycloak_id = $1)',
+      [userId]
+    );
+    const total = parseInt(countRows[0].count);
+
+    console.log(`Fetched ${rows.length} orders for user ${userId}`);
+    res.json({
+      orders: rows,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    });
   } catch (error) {
-    res.status(500).json({ error: 'Database error', details: error.message });
+    console.error('Order fetch error:', {
+      message: error.message,
+      stack: error.stack,
+      userId,
+      queryParams: { page, limit, offset },
+    });
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
@@ -1886,8 +1996,27 @@ app.post('/payment-callback', express.json(), publicDataLimiter, authPostLimiter
 // --- Helper Functions ---
 
 const validateCategory = async (category_id) => {
-  const categoryResult = await pool.query('SELECT * FROM categories WHERE category_id = $1', [category_id]);
-  if (categoryResult.rows.length === 0) throw new Error('Invalid category ID');
+  try {
+    const parsedCategoryId = parseInt(category_id);
+    if (isNaN(parsedCategoryId)) {
+      console.error('Invalid category_id: Not a number', { category_id });
+      throw new Error('Invalid category ID: Must be a number');
+    }
+    const categoryResult = await pool.query('SELECT * FROM categories WHERE category_id = $1', [parsedCategoryId]);
+    if (categoryResult.rows.length === 0) {
+      console.error('Category not found for category_id:', parsedCategoryId);
+      throw new Error('Invalid category ID: Category not found');
+    }
+    console.log('Validated category_id:', parsedCategoryId);
+    return parsedCategoryId;
+  } catch (error) {
+    console.error('validateCategory error:', {
+      category_id,
+      message: error.message,
+      stack: error.stack,
+    });
+    throw error; // Re-throw to maintain existing error handling
+  }
 };
 
 const validateImage = (file) => {
