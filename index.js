@@ -1196,59 +1196,64 @@ app.put('/api/artists/:id', keycloak.protect('realm:artist'), authPutLimiter, as
 
 // --- Artwork Routes ---
 
-app.post('/api/artworks', keycloak.protect('realm:artist'), artworkManagementLimiter, upload.single('image'), async (req, res) => {
-  const keycloakId = req.kauth.grant.access_token.content.sub;
-  const { title, description, price, category_id } = req.body;
-  try {
-    console.log('Processing artwork creation:', { keycloakId, title, category_id, hasFile: !!req.file });
+app.get('/api/artworks', async (req, res) => {
+  const { artist, category, query, sort_by = 'created_at', order = 'desc' } = req.query;
+  let sql = `
+    SELECT a.*, c.name AS category_name,
+           '/uploads/artworks/' || SPLIT_PART(REPLACE(ai.image_path, '\\', '/'), '/', -1) AS image_url
+    FROM artworks a
+    JOIN categories c ON a.category_id = c.category_id
+    LEFT JOIN artwork_images ai ON a.artwork_id = ai.artwork_id
+  `;
+  let conditions = [];
+  let params = [];
+  let paramIndex = 1;
 
-    // Fetch user_id (integer) from users table using keycloak_id (UUID)
-    const { rows: userRows } = await pool.query('SELECT user_id FROM users WHERE keycloak_id = $1', [keycloakId]);
+  if (artist && artist !== 'undefined') {
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(artist)) {
+      console.error('Invalid artist keycloak_id format:', artist);
+      return res.status(400).json({ error: 'Invalid artist ID format' });
+    }
+    const { rows: userRows } = await pool.query('SELECT user_id FROM users WHERE keycloak_id = $1', [artist]);
     if (userRows.length === 0) {
-      console.error('User not found for keycloak_id:', keycloakId);
-      return res.status(404).json({ error: 'User not found' });
+      console.error('Artist not found:', artist);
+      return res.status(404).json({ error: 'Artist not found' });
     }
-    const artist_id = userRows[0].user_id;
-    console.log('Mapped keycloak_id to artist_id:', { keycloakId, artist_id });
+    conditions.push(`a.artist_id = $${paramIndex}`);
+    params.push(userRows[0].user_id);
+    paramIndex++;
+  }
 
-    // Validate required fields
-    if (!title || !price || !category_id) {
-      console.error('Missing required fields:', { title, price, category_id });
-      return res.status(400).json({ error: 'Missing required fields: title, price, or category_id' });
-    }
+  if (category && category !== 'undefined') {
+    conditions.push(`a.category_id = $${paramIndex}`);
+    params.push(category);
+    paramIndex++;
+  }
 
-    // Validate category_id
-    const parsedCategoryId = await validateCategory(category_id);
+  if (query && query !== 'undefined') {
+    conditions.push(`(a.title ILIKE $${paramIndex} OR a.description ILIKE $${paramIndex})`);
+    params.push(`%${query}%`);
+    paramIndex++;
+  }
 
-    // Validate image
-    console.log('Validating image:', { file: req.file });
-    const imagePath = validateImage(req.file);
-    console.log('Image validated:', { imagePath });
+  if (conditions.length > 0) {
+    sql += ' WHERE ' + conditions.join(' AND ');
+  }
 
-    // Insert artwork with artist_id (integer)
-    console.log('Inserting artwork:', { title, description, price, artist_id, category_id: parsedCategoryId });
-    const artwork = await insertArtwork(title, description, price, artist_id, parsedCategoryId);
-    console.log('Artwork inserted:', { artwork_id: artwork.artwork_id });
+  // Sanitize sort_by to prevent SQL injection
+  const validSortFields = ['created_at', 'price', 'category_id'];
+  const sortField = validSortFields.includes(sort_by) ? sort_by : 'created_at';
+  const sortOrder = order.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+  sql += ` ORDER BY a.${sortField} ${sortOrder}`;
 
-    // Insert image
-    console.log('Inserting artwork image:', { artwork_id: artwork.artwork_id, imagePath });
-    await insertArtworkImage(artwork.artwork_id, imagePath);
-    console.log('Artwork image inserted');
-
-    res.status(201).json(artwork);
+  try {
+    console.log('Executing query:', sql, 'with params:', params);
+    const { rows } = await pool.query(sql, params);
+    res.json(rows);
   } catch (error) {
-    console.error('Artwork creation error:', {
-      keycloakId,
-      category_id,
-      title,
-      hasFile: !!req.file,
-      message: error.message,
-      stack: error.stack,
-    });
-    res.status(error.message.includes('Invalid category ID') ? 400 : 500).json({
-      error: 'Failed to create artwork',
-      details: error.message,
-    });
+    console.error('Fetch artworks error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch artworks', details: error.message });
   }
 });
 
@@ -2020,13 +2025,13 @@ const validateCategory = async (category_id) => {
 };
 
 const validateImage = (file) => {
-  if (!file) throw new Error('At least one image is required');
-  let normalizedPath = path.normalize(file.path).replace(/^(\.\.(\/|\\|$))+/, '');
-  normalizedPath = normalizedPath.replace(/\\/g, '/'); // Ensure forward slashes
-  if (/[^a-zA-Z0-9_\-\/\.]/g.test(normalizedPath)) {
-    throw new Error('Invalid characters in file path');
+  if (!file) throw new Error('At least one image is required to create an artwork');
+  const filename = path.basename(file.path);
+  console.log('Validating filename:', filename);
+  if (/[^a-zA-Z0-9_\-.]/.test(filename)) {
+    throw new Error(`Invalid characters in filename: ${filename}`);
   }
-  return normalizedPath;
+  return filename;
 };
 
 const insertArtwork = async (title, description, price, user_id, category_id) => {
