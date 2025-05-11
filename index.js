@@ -1196,7 +1196,7 @@ app.put('/api/artists/:id', keycloak.protect('realm:artist'), authPutLimiter, as
 
 // --- Artwork Routes ---
 
-app.get('/api/artworks', async (req, res) => {
+app.get('/api/artworks', keycloak.protect(), publicDataLimiter, async (req, res) => {
   const { artist, category, query, sort_by = 'created_at', order = 'desc' } = req.query;
   let sql = `
     SELECT a.*, c.name AS category_name,
@@ -1345,19 +1345,29 @@ app.get('/api/artworks', keycloak.protect(), publicDataLimiter, async (req, res)
   }
 });
 
-app.get('/api/artworks/:id', publicDataLimiter, async (req, res) => {
+app.get('/api/artworks/:id', keycloak.protect(), publicDataLimiter, async (req, res) => {
+  const { id } = req.params;
   try {
-    const { rows } = await pool.query(`
-      SELECT a.*, COALESCE(json_agg(ai.image_path) FILTER (WHERE ai.image_path IS NOT NULL), '[]') AS images
+    const { rows } = await pool.query(
+      `
+      SELECT a.*, c.name AS category_name,
+             '/uploads/artworks/' || SPLIT_PART(REPLACE(ai.image_path, '\\', '/'), '/', -1) AS image_url,
+             u.name AS artist_name
       FROM artworks a
+      JOIN categories c ON a.category_id = c.category_id
       LEFT JOIN artwork_images ai ON a.artwork_id = ai.artwork_id
+      JOIN users u ON a.artist_id = u.user_id
       WHERE a.artwork_id = $1
-      GROUP BY a.artwork_id
-    `, [req.params.id]);
-    if (rows.length === 0) return res.status(404).json({ error: 'Artwork not found' });
+      `,
+      [id]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Artwork not found' });
+    }
     res.json(rows[0]);
   } catch (error) {
-    res.status(500).json({ error: 'Database error', details: error.message });
+    console.error('Fetch artwork error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch artwork', details: error.message });
   }
 });
 
