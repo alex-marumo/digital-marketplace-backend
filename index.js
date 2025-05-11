@@ -91,7 +91,7 @@ const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json');
   app.use(keycloak.middleware());
 
   app.use('/uploads', express.static(path.join(__dirname, 'Uploads')));
-  
+
   app.get('/test-session', publicDataLimiter, (req, res) => {
     console.log('Test route - req.session:', req.session);
     res.json({ session: req.session ? 'alive' : 'dead', test: req.session?.test });
@@ -114,7 +114,7 @@ const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json');
 
   // Multer setup for general uploads (artworks)
   const storage = multer.diskStorage({
-    destination: './Uploads/artworks',
+    destination: path.join(__dirname, 'Uploads', 'artworks'),
     filename: (req, file, cb) => {
       cb(null, `${Date.now()}${path.extname(file.originalname)}`);
     },
@@ -123,7 +123,7 @@ const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json');
 
   // Multer setup for artist verification
   const artistStorage = multer.diskStorage({
-    destination: './Uploads/artist_verification/',
+    destination: path.join(__dirname, 'Uploads', 'artist_verification'),
     filename: (req, file, cb) => {
       const ext = path.extname(file.originalname).toLowerCase();
       if (!['.pdf', '.jpg', '.jpeg', '.png'].includes(ext)) {
@@ -1274,8 +1274,8 @@ app.get('/api/artworks', keycloak.protect(), publicDataLimiter, async (req, res)
 
     const params = [];
     let query = `
-      SELECT a.*, c.name AS category_name, 
-             '/uploads/artworks/' || SPLIT_PART(ai.image_path, '/', -1) AS image_url
+      SELECT a.*, c.name AS category_name,
+      '/uploads/artworks/' || SPLIT_PART(REPLACE(ai.image_path, '\\', '/'), '/', -1) AS image_url
       FROM artworks a
       JOIN categories c ON a.category_id = c.category_id
       LEFT JOIN artwork_images ai ON a.artwork_id = ai.artwork_id
@@ -2020,9 +2020,10 @@ const validateCategory = async (category_id) => {
 };
 
 const validateImage = (file) => {
-  if (!file) throw new Error('At least one image is required to create an artwork');
-  const normalizedPath = path.normalize(file.path).replace(/^(\.\.(\/|\\|$))+/, '');
-  if (/[^a-zA-Z0-9_\-\/\\\.]/.test(normalizedPath)) {
+  if (!file) throw new Error('At least one image is required');
+  let normalizedPath = path.normalize(file.path).replace(/^(\.\.(\/|\\|$))+/, '');
+  normalizedPath = normalizedPath.replace(/\\/g, '/'); // Ensure forward slashes
+  if (/[^a-zA-Z0-9_\-\/\.]/g.test(normalizedPath)) {
     throw new Error('Invalid characters in file path');
   }
   return normalizedPath;
