@@ -1808,68 +1808,152 @@ app.get('/api/reviews/:artwork_id', publicDataLimiter, async (req, res) => {
 
 // --- Message Routes ---
 
+// Get all artworks
+router.get('/artworks', keycloak.protect(), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT a.*, c.name AS category_name,
+             '/uploads/artworks/' || SPLIT_PART(REPLACE(ai.image_path, '\\', '/'), '/', -1) AS image_url
+      FROM artworks a
+      JOIN categories c ON a.category_id = c.category_id
+      LEFT JOIN artwork_images ai ON a.artwork_id = ai.artwork_id
+      ORDER BY a.created_at DESC
+      `
+    );
+    console.log('Artworks fetched:', result.rows.length);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Fetch artworks error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch artworks', details: error.message });
+  }
+});
+
 // Get user threads
 router.get('/threads', keycloak.protect(), messageLimiter, async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   if (!isValidUUID(userId)) {
+    console.error('Invalid user ID:', userId);
     return res.status(400).json({ error: 'Invalid user ID format' });
   }
   try {
     const result = await pool.query(
       `
       SELECT t.id, t.participant_id, t.artwork_id, u.name AS username, u.role, a.title AS artwork_title,
-             (SELECT content FROM messages m WHERE m.thread_id = t.id ORDER BY created_at DESC LIMIT 1) as last_message
+             (SELECT content FROM messages m WHERE m.thread_id = t.id AND m.status != 'deleted' ORDER BY created_at DESC LIMIT 1) as last_message
       FROM threads t
       JOIN users u ON u.keycloak_id = t.participant_id
       LEFT JOIN artworks a ON a.artwork_id = t.artwork_id
-      WHERE t.user_id = $1 OR t.participant_id = $1
+      WHERE (t.user_id = $1 OR t.participant_id = $1) AND t.status != 'deleted'
       ORDER BY t.created_at DESC
       `,
       [userId]
     );
+    console.log('Threads fetched for user:', userId, 'Count:', result.rows.length);
     res.json(result.rows);
   } catch (error) {
-    console.error('Fetch threads error:', error.message);
+    console.error('Fetch threads error:', error.message, 'User:', userId);
     res.status(500).json({ error: 'Failed to fetch threads', details: error.message });
   }
 });
 
-// Create a new thread
+// Create a new thread or redirect to existing
 router.post('/threads', keycloak.protect(), messageLimiter, async (req, res) => {
-  const userId = req.kauth.grant.access_token.content.sub;
-  const { artworkId } = req.body;
+  const userId = req.kauth.grant.access_token.content.sub; // UUID
+  const { artworkId } = req.body; // Integer
   if (!isValidUUID(userId) || isNaN(artworkId)) {
+    console.error('Invalid input:', { userId, artworkId });
     return res.status(400).json({ error: 'Invalid user ID or artwork ID format' });
   }
   try {
-    // Get artist for the artwork
+    // Fetch artwork and artist details
     const { rows: artwork } = await pool.query(
-      'SELECT artist_id FROM artworks WHERE artwork_id = $1',
+      'SELECT a.artist_id, u.keycloak_id FROM artworks a JOIN users u ON a.artist_id = u.user_id WHERE a.artwork_id = $1',
       [artworkId]
     );
     if (artwork.length === 0) {
+      console.log('Artwork not found:', artworkId);
       return res.status(404).json({ error: 'Artwork not found' });
     }
-    const recipientId = artwork[0].artist_id;
+    const recipientId = artwork[0].keycloak_id; // UUID
     if (recipientId === userId) {
       return res.status(400).json({ error: 'Cannot create thread with yourself' });
     }
-    const result = await pool.query(
-      `
-      INSERT INTO threads (user_id, participant_id, artwork_id)
-      VALUES ($1, $2, $3)
-      ON CONFLICT ON CONSTRAINT threads_user_id_participant_id_artwork_id_key DO NOTHING
-      RETURNING *
-      `,
-      [userId, recipientId, artworkId]
-    );
-    if (result.rows.length === 0) {
-      return res.status(400).json({ error: 'Thread already exists for this artwork' });
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Check for existing active thread
+      const { rows: existingThread } = await client.query(
+        `SELECT id, user_id, participant_id, artwork_id
+         FROM threads
+         WHERE user_id = $1 AND participant_id = $2 AND artwork_id = $3 AND status != 'deleted'`,
+        [userId, recipientId, artworkId]
+      );
+
+      if (existingThread.length > 0) {
+        console.log('Existing active thread found:', existingThread[0]);
+        await client.query('COMMIT');
+        return res.status(200).json({
+          message: 'Thread already exists',
+          thread: existingThread[0],
+          redirect: true
+        });
+      }
+
+      // Check for soft-deleted thread
+      const { rows: deletedThread } = await client.query(
+        `SELECT id, user_id, participant_id, artwork_id
+         FROM threads
+         WHERE user_id = $1 AND participant_id = $2 AND artwork_id = $3 AND status = 'deleted'`,
+        [userId, recipientId, artworkId]
+      );
+
+      if (deletedThread.length > 0) {
+        console.log('Restoring soft-deleted thread:', deletedThread[0]);
+        await client.query(
+          `UPDATE threads SET status = 'active' WHERE id = $1`,
+          [deletedThread[0].id]
+        );
+        await client.query(
+          `UPDATE messages SET status = 'active' WHERE thread_id = $1`,
+          [deletedThread[0].id]
+        );
+        await client.query('COMMIT');
+        return res.status(200).json({
+          message: 'Thread restored',
+          thread: deletedThread[0],
+          redirect: true
+        });
+      }
+
+      // Create new thread if none exists
+      const result = await client.query(
+        `INSERT INTO threads (user_id, participant_id, artwork_id, status)
+         VALUES ($1, $2, $3, $4)
+         RETURNING *`,
+        [userId, recipientId, artworkId, 'active']
+      );
+      console.log('New thread created:', result.rows[0]);
+      await client.query('COMMIT');
+      res.status(201).json(result.rows[0]);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if (error.code === '23505' && error.constraint === 'threads_user_id_participant_id_artwork_id_key') {
+        console.error('Duplicate thread attempt:', { userId, recipientId, artworkId });
+        return res.status(409).json({
+          error: 'A thread for this artwork and user already exists',
+          details: 'Check your messages for an existing conversation.'
+        });
+      }
+      throw error;
+    } finally {
+      client.release();
     }
-    res.status(201).json(result.rows[0]);
   } catch (error) {
-    console.error('Create thread error:', error.message);
-    res.status(500).json({ error: 'Failed to create thread', details: error.message });
+    console.error('Create thread error:', error.message, 'User:', userId);
+    res.status(500).json({ error: 'Failed to create or fetch thread', details: error.message });
   }
 });
 
@@ -1878,14 +1962,16 @@ router.get('/threads/:threadId/messages', keycloak.protect(), messageLimiter, as
   const userId = req.kauth.grant.access_token.content.sub;
   const { threadId } = req.params;
   if (!isValidUUID(userId) || isNaN(threadId)) {
+    console.error('Invalid input:', { userId, threadId });
     return res.status(400).json({ error: 'Invalid user ID or thread ID format' });
   }
   try {
     const threadCheck = await pool.query(
-      'SELECT * FROM threads WHERE id = $1 AND (user_id = $2 OR participant_id = $2)',
+      'SELECT * FROM threads WHERE id = $1 AND (user_id = $2 OR participant_id = $2) AND status != \'deleted\'',
       [threadId, userId]
     );
     if (threadCheck.rows.length === 0) {
+      console.log('Unauthorized thread access:', { threadId, userId });
       return res.status(403).json({ error: 'Unauthorized access to thread' });
     }
     const result = await pool.query(
@@ -1893,14 +1979,15 @@ router.get('/threads/:threadId/messages', keycloak.protect(), messageLimiter, as
       SELECT m.id, m.content, m.created_at, m.sender_id, u.name AS username
       FROM messages m
       JOIN users u ON u.keycloak_id = m.sender_id
-      WHERE m.thread_id = $1
+      WHERE m.thread_id = $1 AND m.status != 'deleted'
       ORDER BY m.created_at ASC
       `,
       [threadId]
     );
+    console.log('Messages fetched for thread:', threadId, 'Count:', result.rows.length);
     res.json(result.rows);
   } catch (error) {
-    console.error('Fetch messages error:', error.message);
+    console.error('Fetch messages error:', error.message, 'User:', userId);
     res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
   }
 });
@@ -1911,6 +1998,7 @@ router.post('/threads/:threadId/messages', keycloak.protect(), messageLimiter, a
   const { threadId } = req.params;
   const { content } = req.body;
   if (!isValidUUID(userId) || isNaN(threadId)) {
+    console.error('Invalid input:', { userId, threadId });
     return res.status(400).json({ error: 'Invalid user ID or thread ID format' });
   }
   if (!content || !content.trim()) {
@@ -1918,24 +2006,80 @@ router.post('/threads/:threadId/messages', keycloak.protect(), messageLimiter, a
   }
   try {
     const threadCheck = await pool.query(
-      'SELECT * FROM threads WHERE id = $1 AND (user_id = $2 OR participant_id = $2)',
+      'SELECT * FROM threads WHERE id = $1 AND (user_id = $2 OR participant_id = $2) AND status != \'deleted\'',
       [threadId, userId]
     );
     if (threadCheck.rows.length === 0) {
+      console.log('Unauthorized thread access:', { threadId, userId });
       return res.status(403).json({ error: 'Unauthorized access to thread' });
     }
     const result = await pool.query(
       `
-      INSERT INTO messages (thread_id, sender_id, content)
-      VALUES ($1, $2, $3)
+      INSERT INTO messages (thread_id, sender_id, content, status)
+      VALUES ($1, $2, $3, $4)
       RETURNING *
       `,
-      [threadId, userId, content]
+      [threadId, userId, content, 'active']
     );
+    console.log('Message sent:', result.rows[0]);
     res.status(201).json(result.rows[0]);
   } catch (error) {
-    console.error('Send message error:', error.message);
+    console.error('Send message error:', error.message, 'User:', userId);
     res.status(500).json({ error: 'Failed to send message', details: error.message });
+  }
+});
+
+// Delete a thread
+router.delete('/threads/:threadId', keycloak.protect(), messageLimiter, async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+  const { threadId } = req.params;
+
+  if (!isValidUUID(userId) || isNaN(threadId)) {
+    console.error('Invalid input:', { userId, threadId });
+    return res.status(400).json({ error: 'Invalid user ID or thread ID format' });
+  }
+
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Check if the user owns or is a participant in the thread
+      const { rows: thread } = await client.query(
+        'SELECT id FROM threads WHERE id = $1 AND (user_id = $2 OR participant_id = $2) AND status != $3',
+        [threadId, userId, 'deleted']
+      );
+
+      if (thread.length === 0) {
+        console.log('Unauthorized or thread not found:', { threadId, userId });
+        return res.status(403).json({ error: 'Unauthorized or thread not found' });
+      }
+
+      // Soft delete the thread
+      await client.query(
+        'UPDATE threads SET status = $1 WHERE id = $2',
+        ['deleted', threadId]
+      );
+
+      // Soft delete associated messages
+      await client.query(
+        'UPDATE messages SET status = $1 WHERE thread_id = $2',
+        ['deleted', threadId]
+      );
+
+      await client.query('COMMIT');
+      console.log(`Thread ${threadId} deleted by user ${userId}`);
+      res.status(200).json({ message: 'Thread deleted successfully' });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Delete thread error:', error.message, 'User:', userId);
+      res.status(500).json({ error: 'Failed to delete thread', details: error.message });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Delete thread error:', error.message, 'User:', userId);
+    res.status(500).json({ error: 'Server error', details: error.message });
   }
 });
 
