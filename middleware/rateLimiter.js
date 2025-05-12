@@ -26,7 +26,9 @@ const messageLimiter = rateLimit({
   message: { error: 'Too many messages sent, please try again later.' },
   keyGenerator: (req) => {
     return req.kauth?.grant?.access_token?.content?.sub || req.query.token || req.ip || 'anonymous';
-  }
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 
 const artworkManagementLimiter = rateLimit({

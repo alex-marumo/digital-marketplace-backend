@@ -23,7 +23,7 @@ const { createVerificationCode, verifyCode } = require('./services/verificationS
 const { verifyRecaptcha } = require('./services/recaptchaService');
 const fs = require('fs');
 const fsPromises = fs.promises; // Switch to promises for async handling
-
+const router = express.Router();
 
 const { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter } = require('./middleware/rateLimiter');
 console.log('Rate Limiters:', { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter });
@@ -36,6 +36,12 @@ if (process.env.NODE_ENV === 'development') {
     secret: process.env.KEYCLOAK_CLIENT_SECRET ? '****' : 'MISSING'
   });
 }
+
+// UUID validation
+const isValidUUID = (str) => {
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  return uuidRegex.test(str);
+};
 
 const { requireTrustLevel } = require('./middleware/trustLevel');
 const { TRUST_LEVELS, updateTrustLevel, updateUserTrustAfterOrder } = require('./services/trustService');
@@ -64,15 +70,17 @@ const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json');
   app.use(bodyParser.json());
 
   app.use(session({
-    store: sessionStore,
-    secret: process.env.SESSION_SECRET || "your-secret-here",
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      secure: process.env.NODE_ENV === 'production',
-      maxAge: 24 * 60 * 60 * 1000 // 24 hours
-    }
-  }));
+  store: sessionStore,
+  secret: process.env.SESSION_SECRET || "your-secret-here",
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 24 * 60 * 60 * 1000,
+    httpOnly: true, // Add for security
+    sameSite: 'lax' // Ensure cookies are sent in cross-origin requests
+  }
+}));
 
   app.use((req, res, next) => {
     console.log('Session exists pre-Keycloak:', !!req.session);
@@ -81,6 +89,8 @@ const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json');
   });
 
   app.use(keycloak.middleware());
+
+  app.use('/uploads', express.static(path.join(__dirname, 'Uploads')));
 
   app.get('/test-session', publicDataLimiter, (req, res) => {
     console.log('Test route - req.session:', req.session);
@@ -104,7 +114,7 @@ const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json');
 
   // Multer setup for general uploads (artworks)
   const storage = multer.diskStorage({
-    destination: './Uploads/',
+    destination: path.join(__dirname, 'Uploads', 'artworks'),
     filename: (req, file, cb) => {
       cb(null, `${Date.now()}${path.extname(file.originalname)}`);
     },
@@ -113,7 +123,7 @@ const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json');
 
   // Multer setup for artist verification
   const artistStorage = multer.diskStorage({
-    destination: './Uploads/artist_verification/',
+    destination: path.join(__dirname, 'Uploads', 'artist_verification'),
     filename: (req, file, cb) => {
       const ext = path.extname(file.originalname).toLowerCase();
       if (!['.pdf', '.jpg', '.jpeg', '.png'].includes(ext)) {
@@ -784,6 +794,8 @@ app.post('/api/resend-verification-code', registrationLimiter, async (req, res) 
 });
 
 app.get('/api/users/me', keycloak.protect(), authGetLimiter, async (req, res) => {
+  const keycloakId = req.kauth.grant.access_token.content.sub;
+  console.log('Keycloak ID from token:', keycloakId);
   try {
     const keycloakId = req.kauth.grant.access_token.content.sub;
     const emailVerified = req.kauth.grant.access_token.content.email_verified || false;
@@ -1184,18 +1196,64 @@ app.put('/api/artists/:id', keycloak.protect('realm:artist'), authPutLimiter, as
 
 // --- Artwork Routes ---
 
-app.post('/api/artworks', keycloak.protect('realm:artist'), artworkManagementLimiter, upload.single('image'), async (req, res) => {
-  const userId = req.kauth.grant.access_token.content.sub;
-  const { title, description, price, category_id } = req.body;
+app.get('/api/artworks', keycloak.protect(), publicDataLimiter, async (req, res) => {
+  const { artist, category, query, sort_by = 'created_at', order = 'desc' } = req.query;
+  let sql = `
+    SELECT a.*, c.name AS category_name,
+           '/uploads/artworks/' || SPLIT_PART(REPLACE(ai.image_path, '\\', '/'), '/', -1) AS image_url
+    FROM artworks a
+    JOIN categories c ON a.category_id = c.category_id
+    LEFT JOIN artwork_images ai ON a.artwork_id = ai.artwork_id
+  `;
+  let conditions = [];
+  let params = [];
+  let paramIndex = 1;
+
+  if (artist && artist !== 'undefined') {
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(artist)) {
+      console.error('Invalid artist keycloak_id format:', artist);
+      return res.status(400).json({ error: 'Invalid artist ID format' });
+    }
+    const { rows: userRows } = await pool.query('SELECT user_id FROM users WHERE keycloak_id = $1', [artist]);
+    if (userRows.length === 0) {
+      console.error('Artist not found:', artist);
+      return res.status(404).json({ error: 'Artist not found' });
+    }
+    conditions.push(`a.artist_id = $${paramIndex}`);
+    params.push(userRows[0].user_id);
+    paramIndex++;
+  }
+
+  if (category && category !== 'undefined') {
+    conditions.push(`a.category_id = $${paramIndex}`);
+    params.push(category);
+    paramIndex++;
+  }
+
+  if (query && query !== 'undefined') {
+    conditions.push(`(a.title ILIKE $${paramIndex} OR a.description ILIKE $${paramIndex})`);
+    params.push(`%${query}%`);
+    paramIndex++;
+  }
+
+  if (conditions.length > 0) {
+    sql += ' WHERE ' + conditions.join(' AND ');
+  }
+
+  // Sanitize sort_by to prevent SQL injection
+  const validSortFields = ['created_at', 'price', 'category_id'];
+  const sortField = validSortFields.includes(sort_by) ? sort_by : 'created_at';
+  const sortOrder = order.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+  sql += ` ORDER BY a.${sortField} ${sortOrder}`;
+
   try {
-    await validateCategory(category_id);
-    const imagePath = validateImage(req.file);
-    const artwork = await insertArtwork(title, description, price, userId, category_id);
-    await insertArtworkImage(artwork.artwork_id, imagePath);
-    res.status(201).json(artwork);
+    console.log('Executing query:', sql, 'with params:', params);
+    const { rows } = await pool.query(sql, params);
+    res.json(rows);
   } catch (error) {
-    console.error('Database error:', error.message);
-    res.status(500).json({ error: 'Database error', details: error.message });
+    console.error('Fetch artworks error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch artworks', details: error.message });
   }
 });
 
@@ -1214,76 +1272,102 @@ app.post('/api/artworks/:id/images', keycloak.protect('realm:artist'), artworkMa
   }
 });
 
-app.get('/api/artworks', publicDataLimiter, async (req, res) => {
+app.get('/api/artworks', keycloak.protect(), publicDataLimiter, async (req, res) => {
+  const { artist, category, sort_by = 'created_at', order = 'desc' } = req.query;
   try {
-    const { artist, category, sort_by, order } = req.query;
+    console.log('Fetching artworks:', { artist, category, sort_by, order });
+
+    const params = [];
     let query = `
-      SELECT a.*, 
-             COALESCE(json_agg(ai.image_path) FILTER (WHERE ai.image_path IS NOT NULL), '[]') AS images,
-             u.name AS artist_name
+      SELECT a.*, c.name AS category_name,
+      '/uploads/artworks/' || SPLIT_PART(REPLACE(ai.image_path, '\\', '/'), '/', -1) AS image_url
       FROM artworks a
+      JOIN categories c ON a.category_id = c.category_id
       LEFT JOIN artwork_images ai ON a.artwork_id = ai.artwork_id
-      LEFT JOIN order_items oi ON a.artwork_id = oi.artwork_id
-      LEFT JOIN orders o ON oi.order_id = o.order_id
-      LEFT JOIN payments p ON o.order_id = p.order_id
-      LEFT JOIN artists ar ON a.artist_id = ar.user_id
-      LEFT JOIN users u ON ar.user_id = u.user_id
-      WHERE (o.order_id IS NULL OR p.status != 'completed')
     `;
-    const values = [];
     let conditions = [];
 
-    if (artist) {
-      conditions.push(`a.artist_id = $${values.length + 1}`);
-      values.push(artist);
-    }
-    if (category) {
-      conditions.push(`a.category_id = (SELECT category_id FROM categories WHERE name = $${values.length + 1})`);
-      values.push(category);
-    }
-    if (conditions.length > 0) {
-      query += ` AND ${conditions.join(' AND ')}`;
-    }
-    query += ` GROUP BY a.artwork_id, u.name`;
-
-    // Secure ORDER BY handling
-    const sortFieldMap = {
-      created_at: 'a.created_at',
-      price: 'a.price'
-    };
-    const orderMap = {
-      asc: 'ASC',
-      desc: 'DESC'
-    };
-    if (sort_by && order) {
-      const mappedSortField = sortFieldMap[sort_by];
-      const mappedOrder = orderMap[order];
-      if (mappedSortField && mappedOrder) {
-        query += ` ORDER BY ${mappedSortField} ${mappedOrder}`;
+    if (artist && artist !== 'undefined') {
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidRegex.test(artist)) {
+        console.error('Invalid artist keycloak_id format:', artist);
+        return res.status(400).json({ error: 'Invalid artist ID format' });
       }
+      const { rows: userRows } = await pool.query('SELECT user_id FROM users WHERE keycloak_id = $1', [artist]);
+      if (userRows.length === 0) {
+        console.error('Artist not found:', artist);
+        return res.status(404).json({ error: 'Artist not found' });
+      }
+      conditions.push(`a.artist_id = $${params.length + 1}`);
+      params.push(userRows[0].user_id);
     }
 
-    const { rows } = await pool.query(query, values);
+    if (category && category !== 'undefined') {
+      const parsedCategoryId = parseInt(category);
+      if (isNaN(parsedCategoryId)) {
+        console.error('Invalid category_id:', category);
+        return res.status(400).json({ error: 'Invalid category ID' });
+      }
+      const { rows: categoryRows } = await pool.query('SELECT category_id FROM categories WHERE category_id = $1', [parsedCategoryId]);
+      if (categoryRows.length === 0) {
+        console.error('Category not found:', parsedCategoryId);
+        return res.status(400).json({ error: 'Category not found' });
+      }
+      conditions.push(`a.category_id = $${params.length + 1}`);
+      params.push(parsedCategoryId);
+    }
+
+    if (conditions.length > 0) {
+      query += ' WHERE ' + conditions.join(' AND ');
+    }
+
+    const validSortFields = ['created_at', 'price', 'category_id'];
+    const validOrders = ['asc', 'desc'];
+    const safeSortBy = validSortFields.includes(sort_by) ? sort_by : 'created_at';
+    const safeOrder = validOrders.includes(order) ? order : 'desc';
+    query += ` ORDER BY a.${safeSortBy} ${safeOrder}`;
+
+    console.log('Executing query:', { query, params });
+    const { rows } = await pool.query(query, params);
+    console.log('Artworks fetched:', { count: rows.length });
+
     res.json(rows);
   } catch (error) {
-    console.error('Artwork fetch error:', error.message, error.stack);
-    res.status(500).json({ error: 'Database error', details: error.message });
+    console.error('Artwork fetch error:', {
+      artist,
+      category,
+      sort_by,
+      order,
+      message: error.message,
+      stack: error.stack,
+    });
+    res.status(500).json({ error: 'Failed to fetch artworks', details: error.message });
   }
 });
 
-app.get('/api/artworks/:id', publicDataLimiter, async (req, res) => {
+app.get('/api/artworks/:id', keycloak.protect(), publicDataLimiter, async (req, res) => {
+  const { id } = req.params;
   try {
-    const { rows } = await pool.query(`
-      SELECT a.*, COALESCE(json_agg(ai.image_path) FILTER (WHERE ai.image_path IS NOT NULL), '[]') AS images
+    const { rows } = await pool.query(
+      `
+      SELECT a.*, c.name AS category_name,
+             '/uploads/artworks/' || SPLIT_PART(REPLACE(ai.image_path, '\\', '/'), '/', -1) AS image_url,
+             u.name AS artist_name
       FROM artworks a
+      JOIN categories c ON a.category_id = c.category_id
       LEFT JOIN artwork_images ai ON a.artwork_id = ai.artwork_id
+      JOIN users u ON a.artist_id = u.user_id
       WHERE a.artwork_id = $1
-      GROUP BY a.artwork_id
-    `, [req.params.id]);
-    if (rows.length === 0) return res.status(404).json({ error: 'Artwork not found' });
+      `,
+      [id]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Artwork not found' });
+    }
     res.json(rows[0]);
   } catch (error) {
-    res.status(500).json({ error: 'Database error', details: error.message });
+    console.error('Fetch artwork error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch artwork', details: error.message });
   }
 });
 
@@ -1336,10 +1420,15 @@ app.post('/api/categories', keycloak.protect('realm:admin'), authPostLimiter, as
 
 app.get('/api/categories', publicDataLimiter, async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM categories');
+    const { rows } = await pool.query('SELECT category_id, name, description FROM categories ORDER BY name');
+    console.log(`Fetched ${rows.length} categories:`, rows.map(r => r.name));
     res.json(rows);
   } catch (error) {
-    res.status(500).json({ error: 'Database error', details: error.message });
+    console.error('Category fetch error:', {
+      message: error.message,
+      stack: error.stack,
+    });
+    res.status(500).json({ error: 'Failed to fetch categories', details: error.message });
   }
 });
 
@@ -1402,12 +1491,58 @@ app.post('/api/orders', keycloak.protect('realm:buyer'), orderLimiter, requireTr
 });
 
 app.get('/api/orders', keycloak.protect(), authGetLimiter, async (req, res) => {
-  const userId = req.kauth.grant.access_token.content.sub;
+  const userId = req.kauth?.grant?.access_token?.content?.sub;
+  if (!userId) {
+    console.error('No user ID in Keycloak token');
+    return res.status(401).json({ error: 'Unauthorized: Invalid token' });
+  }
+
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
+  const offset = (page - 1) * limit;
+
   try {
-    const { rows } = await pool.query('SELECT * FROM orders WHERE buyer_id = $1', [userId]);
-    res.json(rows);
+    // Verify DB connection
+    await pool.query('SELECT 1');
+    console.log('DB connection OK');
+
+    // Query with order_items bridge
+    const { rows } = await pool.query(`
+      SELECT 
+        o.order_id, 
+        o.total_amount AS price, 
+        o.status, 
+        STRING_AGG(COALESCE(a.title, 'Unknown Artwork'), ', ') AS artwork_title
+      FROM orders o
+      LEFT JOIN order_items oi ON o.order_id = oi.order_id
+      LEFT JOIN artworks a ON oi.artwork_id = a.artwork_id
+      WHERE o.buyer_id = (
+        SELECT user_id FROM users WHERE keycloak_id = $1
+      )
+      GROUP BY o.order_id, o.total_amount, o.status
+      ORDER BY o.created_at DESC
+      LIMIT $2 OFFSET $3
+    `, [userId, limit, offset]);
+
+    const { rows: countRows } = await pool.query(
+      'SELECT COUNT(*) FROM orders WHERE buyer_id = (SELECT user_id FROM users WHERE keycloak_id = $1)',
+      [userId]
+    );
+    const total = parseInt(countRows[0].count);
+
+    console.log(`Fetched ${rows.length} orders for user ${userId}`);
+    res.json({
+      orders: rows,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    });
   } catch (error) {
-    res.status(500).json({ error: 'Database error', details: error.message });
+    console.error('Order fetch error:', {
+      message: error.message,
+      stack: error.stack,
+      userId,
+      queryParams: { page, limit, offset },
+    });
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
@@ -1673,19 +1808,283 @@ app.get('/api/reviews/:artwork_id', publicDataLimiter, async (req, res) => {
 
 // --- Message Routes ---
 
-app.post('/api/messages', keycloak.protect(), messageLimiter, async (req, res) => {
-  const userId = req.kauth.grant.access_token.content.sub;
-  const { receiver_id, content } = req.body;
+// Get all artworks
+router.get('/artworks', keycloak.protect(), publicDataLimiter, async (req, res) => {
   try {
-    const { rows } = await pool.query(
-      'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3) RETURNING *',
-      [userId, receiver_id, content]
+    const result = await pool.query(
+      `
+      SELECT a.*, c.name AS category_name,
+             '/uploads/artworks/' || SPLIT_PART(REPLACE(ai.image_path, '\\', '/'), '/', -1) AS image_url
+      FROM artworks a
+      JOIN categories c ON a.category_id = c.category_id
+      LEFT JOIN artwork_images ai ON a.artwork_id = ai.artwork_id
+      ORDER BY a.created_at DESC
+      `
     );
-    res.status(201).json(rows[0]);
+    console.log('Artworks fetched:', result.rows.length);
+    res.json(result.rows);
   } catch (error) {
-    res.status(500).json({ error: 'Database error', details: error.message });
+    console.error('Fetch artworks error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch artworks', details: error.message });
   }
 });
+
+// Get user threads
+router.get('/threads', keycloak.protect(), messageLimiter, async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+  if (!isValidUUID(userId)) {
+    console.error('Invalid user ID:', userId);
+    return res.status(400).json({ error: 'Invalid user ID format' });
+  }
+  try {
+    const result = await pool.query(
+      `
+      SELECT t.id, t.participant_id, t.artwork_id, u.name AS username, u.role, a.title AS artwork_title,
+             (SELECT content FROM messages m WHERE m.thread_id = t.id AND m.status != 'deleted' ORDER BY created_at DESC LIMIT 1) as last_message
+      FROM threads t
+      JOIN users u ON u.keycloak_id = t.participant_id
+      LEFT JOIN artworks a ON a.artwork_id = t.artwork_id
+      WHERE (t.user_id = $1 OR t.participant_id = $1) AND t.status != 'deleted'
+      ORDER BY t.created_at DESC
+      `,
+      [userId]
+    );
+    console.log('Threads fetched for user:', userId, 'Count:', result.rows.length);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Fetch threads error:', error.message, 'User:', userId);
+    res.status(500).json({ error: 'Failed to fetch threads', details: error.message });
+  }
+});
+
+// Create a new thread or redirect to existing
+router.post('/threads', keycloak.protect(), messageLimiter, async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub; // UUID
+  const { artworkId } = req.body; // Integer
+  if (!isValidUUID(userId) || isNaN(artworkId)) {
+    console.error('Invalid input:', { userId, artworkId });
+    return res.status(400).json({ error: 'Invalid user ID or artwork ID format' });
+  }
+  try {
+    // Fetch artwork and artist details
+    const { rows: artwork } = await pool.query(
+      'SELECT a.artist_id, u.keycloak_id FROM artworks a JOIN users u ON a.artist_id = u.user_id WHERE a.artwork_id = $1',
+      [artworkId]
+    );
+    if (artwork.length === 0) {
+      console.log('Artwork not found:', artworkId);
+      return res.status(404).json({ error: 'Artwork not found' });
+    }
+    const recipientId = artwork[0].keycloak_id; // UUID
+    if (recipientId === userId) {
+      return res.status(400).json({ error: 'Cannot create thread with yourself' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Check for existing active thread
+      const { rows: existingThread } = await client.query(
+        `SELECT id, user_id, participant_id, artwork_id
+         FROM threads
+         WHERE user_id = $1 AND participant_id = $2 AND artwork_id = $3 AND status != 'deleted'`,
+        [userId, recipientId, artworkId]
+      );
+
+      if (existingThread.length > 0) {
+        console.log('Existing active thread found:', existingThread[0]);
+        await client.query('COMMIT');
+        return res.status(200).json({
+          message: 'Thread already exists',
+          thread: existingThread[0],
+          redirect: true
+        });
+      }
+
+      // Check for soft-deleted thread
+      const { rows: deletedThread } = await client.query(
+        `SELECT id, user_id, participant_id, artwork_id
+         FROM threads
+         WHERE user_id = $1 AND participant_id = $2 AND artwork_id = $3 AND status = 'deleted'`,
+        [userId, recipientId, artworkId]
+      );
+
+      if (deletedThread.length > 0) {
+        console.log('Restoring soft-deleted thread:', deletedThread[0]);
+        await client.query(
+          `UPDATE threads SET status = 'active' WHERE id = $1`,
+          [deletedThread[0].id]
+        );
+        await client.query(
+          `UPDATE messages SET status = 'active' WHERE thread_id = $1`,
+          [deletedThread[0].id]
+        );
+        await client.query('COMMIT');
+        return res.status(200).json({
+          message: 'Thread restored',
+          thread: deletedThread[0],
+          redirect: true
+        });
+      }
+
+      // Create new thread if none exists
+      const result = await client.query(
+        `INSERT INTO threads (user_id, participant_id, artwork_id, status)
+         VALUES ($1, $2, $3, $4)
+         RETURNING *`,
+        [userId, recipientId, artworkId, 'active']
+      );
+      console.log('New thread created:', result.rows[0]);
+      await client.query('COMMIT');
+      res.status(201).json(result.rows[0]);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if (error.code === '23505' && error.constraint === 'threads_user_id_participant_id_artwork_id_key') {
+        console.error('Duplicate thread attempt:', { userId, recipientId, artworkId });
+        return res.status(409).json({
+          error: 'A thread for this artwork and user already exists',
+          details: 'Check your messages for an existing conversation.'
+        });
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Create thread error:', error.message, 'User:', userId);
+    res.status(500).json({ error: 'Failed to create or fetch thread', details: error.message });
+  }
+});
+
+// Get messages for a thread
+router.get('/threads/:threadId/messages', keycloak.protect(), messageLimiter, async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+  const { threadId } = req.params;
+  if (!isValidUUID(userId) || isNaN(threadId)) {
+    console.error('Invalid input:', { userId, threadId });
+    return res.status(400).json({ error: 'Invalid user ID or thread ID format' });
+  }
+  try {
+    const threadCheck = await pool.query(
+      'SELECT * FROM threads WHERE id = $1 AND (user_id = $2 OR participant_id = $2) AND status != \'deleted\'',
+      [threadId, userId]
+    );
+    if (threadCheck.rows.length === 0) {
+      console.log('Unauthorized thread access:', { threadId, userId });
+      return res.status(403).json({ error: 'Unauthorized access to thread' });
+    }
+    const result = await pool.query(
+      `
+      SELECT m.id, m.content, m.created_at, m.sender_id, u.name AS username
+      FROM messages m
+      JOIN users u ON u.keycloak_id = m.sender_id
+      WHERE m.thread_id = $1 AND m.status != 'deleted'
+      ORDER BY m.created_at ASC
+      `,
+      [threadId]
+    );
+    console.log('Messages fetched for thread:', threadId, 'Count:', result.rows.length);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Fetch messages error:', error.message, 'User:', userId);
+    res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
+  }
+});
+
+// Send a message
+router.post('/threads/:threadId/messages', keycloak.protect(), messageLimiter, async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+  const { threadId } = req.params;
+  const { content } = req.body;
+  if (!isValidUUID(userId) || isNaN(threadId)) {
+    console.error('Invalid input:', { userId, threadId });
+    return res.status(400).json({ error: 'Invalid user ID or thread ID format' });
+  }
+  if (!content || !content.trim()) {
+    return res.status(400).json({ error: 'Message content cannot be empty' });
+  }
+  try {
+    const threadCheck = await pool.query(
+      'SELECT * FROM threads WHERE id = $1 AND (user_id = $2 OR participant_id = $2) AND status != \'deleted\'',
+      [threadId, userId]
+    );
+    if (threadCheck.rows.length === 0) {
+      console.log('Unauthorized thread access:', { threadId, userId });
+      return res.status(403).json({ error: 'Unauthorized access to thread' });
+    }
+    const result = await pool.query(
+      `
+      INSERT INTO messages (thread_id, sender_id, content, status)
+      VALUES ($1, $2, $3, $4)
+      RETURNING *
+      `,
+      [threadId, userId, content, 'active']
+    );
+    console.log('Message sent:', result.rows[0]);
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('Send message error:', error.message, 'User:', userId);
+    res.status(500).json({ error: 'Failed to send message', details: error.message });
+  }
+});
+
+// Delete a thread
+router.delete('/threads/:threadId', keycloak.protect(), messageLimiter, async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+  const { threadId } = req.params;
+
+  if (!isValidUUID(userId) || isNaN(threadId)) {
+    console.error('Invalid input:', { userId, threadId });
+    return res.status(400).json({ error: 'Invalid user ID or thread ID format' });
+  }
+
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Check if the user owns or is a participant in the thread
+      const { rows: thread } = await client.query(
+        'SELECT id FROM threads WHERE id = $1 AND (user_id = $2 OR participant_id = $2) AND status != $3',
+        [threadId, userId, 'deleted']
+      );
+
+      if (thread.length === 0) {
+        console.log('Unauthorized or thread not found:', { threadId, userId });
+        return res.status(403).json({ error: 'Unauthorized or thread not found' });
+      }
+
+      // Soft delete the thread
+      await client.query(
+        'UPDATE threads SET status = $1 WHERE id = $2',
+        ['deleted', threadId]
+      );
+
+      // Soft delete associated messages
+      await client.query(
+        'UPDATE messages SET status = $1 WHERE thread_id = $2',
+        ['deleted', threadId]
+      );
+
+      await client.query('COMMIT');
+      console.log(`Thread ${threadId} deleted by user ${userId}`);
+      res.status(200).json({ message: 'Thread deleted successfully' });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Delete thread error:', error.message, 'User:', userId);
+      res.status(500).json({ error: 'Failed to delete thread', details: error.message });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Delete thread error:', error.message, 'User:', userId);
+    res.status(500).json({ error: 'Server error', details: error.message });
+  }
+});
+
+// Mount the router
+app.use('/api', router);
 
 // --- PayPal Callback ---
 
@@ -1756,17 +2155,37 @@ app.post('/payment-callback', express.json(), publicDataLimiter, authPostLimiter
 // --- Helper Functions ---
 
 const validateCategory = async (category_id) => {
-  const categoryResult = await pool.query('SELECT * FROM categories WHERE category_id = $1', [category_id]);
-  if (categoryResult.rows.length === 0) throw new Error('Invalid category ID');
+  try {
+    const parsedCategoryId = parseInt(category_id);
+    if (isNaN(parsedCategoryId)) {
+      console.error('Invalid category_id: Not a number', { category_id });
+      throw new Error('Invalid category ID: Must be a number');
+    }
+    const categoryResult = await pool.query('SELECT * FROM categories WHERE category_id = $1', [parsedCategoryId]);
+    if (categoryResult.rows.length === 0) {
+      console.error('Category not found for category_id:', parsedCategoryId);
+      throw new Error('Invalid category ID: Category not found');
+    }
+    console.log('Validated category_id:', parsedCategoryId);
+    return parsedCategoryId;
+  } catch (error) {
+    console.error('validateCategory error:', {
+      category_id,
+      message: error.message,
+      stack: error.stack,
+    });
+    throw error; // Re-throw to maintain existing error handling
+  }
 };
 
 const validateImage = (file) => {
   if (!file) throw new Error('At least one image is required to create an artwork');
-  const normalizedPath = path.normalize(file.path).replace(/^(\.\.(\/|\\|$))+/, '');
-  if (/[^a-zA-Z0-9_\-\/\\\.]/.test(normalizedPath)) {
-    throw new Error('Invalid characters in file path');
+  const filename = path.basename(file.path);
+  console.log('Validating filename:', filename);
+  if (/[^a-zA-Z0-9_\-.]/.test(filename)) {
+    throw new Error(`Invalid characters in filename: ${filename}`);
   }
-  return normalizedPath;
+  return filename;
 };
 
 const insertArtwork = async (title, description, price, user_id, category_id) => {
