@@ -1809,7 +1809,7 @@ app.get('/api/reviews/:artwork_id', publicDataLimiter, async (req, res) => {
 // --- Message Routes ---
 
 // Get all artworks
-router.get('/artworks', keycloak.protect(), async (req, res) => {
+router.get('/artworks', keycloak.protect(), publicDataLimiter, async (req, res) => {
   try {
     const result = await pool.query(
       `
