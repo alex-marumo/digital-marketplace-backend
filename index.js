@@ -5,6 +5,11 @@ console.log('Keycloak Config:', {
   clientId: process.env.KEYCLOAK_CLIENT_ID,
   secret: process.env.KEYCLOAK_CLIENT_SECRET ? '****' : 'MISSING'
 });
+console.log('[ENV DEBUG] PayPal Config:', {
+  clientId: process.env.PAYPAL_CLIENT_ID,
+  clientSecret: process.env.PAYPAL_CLIENT_SECRET,
+  appUrl: process.env.APP_URL
+});
 
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -22,8 +27,12 @@ const { sendVerificationEmail, sendEmail } = require('./services/emailService');
 const { createVerificationCode, verifyCode } = require('./services/verificationService');
 const { verifyRecaptcha } = require('./services/recaptchaService');
 const fs = require('fs');
-const fsPromises = fs.promises; // Switch to promises for async handling
+const fsPromises = fs.promises;
 const router = express.Router();
+
+const paypal = require('@paypal/checkout-server-sdk');
+const environment = new paypal.core.SandboxEnvironment(process.env.PAYPAL_CLIENT_ID, process.env.PAYPAL_CLIENT_SECRET);
+const paypalClient = new paypal.core.PayPalHttpClient(environment);
 
 const { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter } = require('./middleware/rateLimiter');
 console.log('Rate Limiters:', { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter });
@@ -70,17 +79,17 @@ const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json');
   app.use(bodyParser.json());
 
   app.use(session({
-  store: sessionStore,
-  secret: process.env.SESSION_SECRET || "your-secret-here",
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    secure: process.env.NODE_ENV === 'production',
-    maxAge: 24 * 60 * 60 * 1000,
-    httpOnly: true, // Add for security
-    sameSite: 'lax' // Ensure cookies are sent in cross-origin requests
-  }
-}));
+    store: sessionStore,
+    secret: process.env.SESSION_SECRET || "your-secret-here",
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: 24 * 60 * 60 * 1000,
+      httpOnly: true,
+      sameSite: 'lax'
+    }
+  }));
 
   app.use((req, res, next) => {
     console.log('Session exists pre-Keycloak:', !!req.session);
@@ -149,24 +158,24 @@ const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json');
 
   // Multer setup for profile photos
   const profileStorage = multer.diskStorage({
-  destination: './Uploads/profiles/',
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    cb(null, `${req.kauth.grant.access_token.content.sub}-${Date.now()}${ext}`);
-  },
-});
+    destination: './Uploads/profiles/',
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname).toLowerCase();
+      cb(null, `${req.kauth.grant.access_token.content.sub}-${Date.now()}${ext}`);
+    },
+  });
 
-const profileUpload = multer({
-  storage: profileStorage,
-  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB limit
-  fileFilter: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    if (!['.jpg', '.jpeg', '.png'].includes(ext)) {
-      return cb(new Error('Only JPG, JPEG, or PNG allowed'));
-    }
-    cb(null, true);
-  },
-}).single('profilePhoto');
+  const profileUpload = multer({
+    storage: profileStorage,
+    limits: { fileSize: 2 * 1024 * 1024 },
+    fileFilter: (req, file, cb) => {
+      const ext = path.extname(file.originalname).toLowerCase();
+      if (!['.jpg', '.jpeg', '.png'].includes(ext)) {
+        return cb(new Error('Only JPG, JPEG, or PNG allowed'));
+      }
+      cb(null, true);
+    },
+  }).single('profilePhoto');
 
 // --- User Routes ---
 
@@ -1418,7 +1427,7 @@ app.post('/api/categories', keycloak.protect('realm:admin'), authPostLimiter, as
   }
 });
 
-app.get('/api/categories', publicDataLimiter, async (req, res) => {
+router.get('/categories', keycloak.protect(), requireTrustLevel(TRUST_LEVELS.VERIFIED), publicDataLimiter, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT category_id, name, description FROM categories ORDER BY name');
     console.log(`Fetched ${rows.length} categories:`, rows.map(r => r.name));
@@ -1475,84 +1484,191 @@ app.post('/api/search', publicDataLimiter, async (req, res) => {
 
 // --- Order Routes ---
 
-app.post('/api/orders', keycloak.protect('realm:buyer'), orderLimiter, requireTrustLevel(TRUST_LEVELS.VERIFIED), async (req, res) => {
+router.post('/orders', keycloak.protect(), orderLimiter, requireTrustLevel(TRUST_LEVELS.VERIFIED), async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
-  const { artwork_id, total_amount } = req.body;
-  try {
-    const { rows } = await pool.query(
-      'INSERT INTO orders (buyer_id, artwork_id, total_amount) VALUES ($1, $2, $3) RETURNING *',
-      [userId, artwork_id, total_amount]
-    );
-    await updateUserTrustAfterOrder(userId);
-    res.status(201).json(rows[0]);
-  } catch (error) {
-    res.status(500).json({ error: 'Database error', details: error.message });
-  }
-});
+  const { artworkId, paymentMethod } = req.body;
 
-app.get('/api/orders', keycloak.protect(), authGetLimiter, async (req, res) => {
-  const userId = req.kauth?.grant?.access_token?.content?.sub;
-  if (!userId) {
-    console.error('No user ID in Keycloak token');
-    return res.status(401).json({ error: 'Unauthorized: Invalid token' });
+  console.log('[ORDER POST DEBUG] Request:', { userId, artworkId, paymentMethod });
+
+  if (!artworkId || isNaN(parseInt(artworkId))) {
+    console.log('[ORDER POST ERROR] Invalid artwork ID:', artworkId);
+    return res.status(400).json({ error: 'Invalid artwork ID' });
+  }
+  if (!['paypal', 'orange_money', 'myzaka'].includes(paymentMethod)) {
+    console.log('[ORDER POST ERROR] Invalid payment method:', paymentMethod);
+    return res.status(400).json({ error: 'Invalid payment method' });
   }
 
-  const page = parseInt(req.query.page) || 1;
-  const limit = parseInt(req.query.limit) || 10;
-  const offset = (page - 1) * limit;
-
+  const client = await pool.connect();
   try {
-    // Verify DB connection
-    await pool.query('SELECT 1');
-    console.log('DB connection OK');
-
-    // Query with order_items bridge
-    const { rows } = await pool.query(`
-      SELECT 
-        o.order_id, 
-        o.total_amount AS price, 
-        o.status, 
-        STRING_AGG(COALESCE(a.title, 'Unknown Artwork'), ', ') AS artwork_title
-      FROM orders o
-      LEFT JOIN order_items oi ON o.order_id = oi.order_id
-      LEFT JOIN artworks a ON oi.artwork_id = a.artwork_id
-      WHERE o.buyer_id = (
-        SELECT user_id FROM users WHERE keycloak_id = $1
-      )
-      GROUP BY o.order_id, o.total_amount, o.status
-      ORDER BY o.created_at DESC
-      LIMIT $2 OFFSET $3
-    `, [userId, limit, offset]);
-
-    const { rows: countRows } = await pool.query(
-      'SELECT COUNT(*) FROM orders WHERE buyer_id = (SELECT user_id FROM users WHERE keycloak_id = $1)',
+    console.log('[ORDER POST DEBUG] Fetching user:', userId);
+    const { rows: userRows } = await client.query(
+      'SELECT user_id FROM users WHERE keycloak_id = $1',
       [userId]
     );
-    const total = parseInt(countRows[0].count);
+    if (userRows.length === 0) {
+      console.log('[ORDER POST ERROR] User not found:', userId);
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const dbUserId = userRows[0].user_id;
 
-    console.log(`Fetched ${rows.length} orders for user ${userId}`);
-    res.json({
-      orders: rows,
-      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
-    });
+    console.log('[ORDER POST DEBUG] Fetching artwork:', artworkId);
+    const { rows: artworkRows } = await client.query(
+      'SELECT artwork_id, title, price FROM artworks WHERE artwork_id = $1 AND status = $2',
+      [artworkId, 'available']
+    );
+    if (artworkRows.length === 0) {
+      console.log('[ORDER POST ERROR] Artwork not found or unavailable:', artworkId);
+      return res.status(404).json({ error: 'Artwork not found or unavailable' });
+    }
+
+    let paymentId, paymentUrl, paymentStatus = 'pending';
+    if (paymentMethod === 'paypal') {
+      const request = new paypal.orders.OrdersCreateRequest();
+      request.prefer('return=representation');
+      request.requestBody({
+        intent: 'CAPTURE',
+        purchase_units: [{
+          amount: {
+            currency_code: 'BWP',
+            value: artworkRows[0].price.toFixed(2)
+          },
+          description: `Purchase of ${artworkRows[0].title}`
+        }],
+        application_context: {
+          return_url: `${API_BASE_URL}/order-success`,
+          cancel_url: `${API_BASE_URL}/order-cancel`
+        }
+      });
+      const response = await paypalClient.execute(request);
+      paymentId = response.result.id;
+      paymentUrl = response.result.links.find(link => link.rel === 'approve').href;
+      console.log('[ORDER POST PAYPAL] Created order:', { paymentId, paymentUrl });
+    } else {
+      // Mock Orange Money and MyZaka
+      paymentId = `${paymentMethod}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+      paymentUrl = `/mock-payment/${paymentId}`;
+      console.log(`[ORDER POST MOCK ${paymentMethod.toUpperCase()}] Mocked payment:`, { paymentId, paymentUrl });
+    }
+
+    console.log('[ORDER POST DEBUG] Creating order:', { dbUserId, artworkId });
+    const { rows: orderRows } = await client.query(
+      'INSERT INTO orders (buyer_id, artwork_id, total_amount, status, payment_status, payment_method, payment_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING order_id',
+      [dbUserId, artworkId, artworkRows[0].price, 'pending', paymentStatus, paymentMethod, paymentId]
+    );
+
+    console.log('[ORDER POST SUCCESS] Order created:', orderRows[0]);
+    res.status(200).json({ order_id: orderRows[0].order_id, redirect: paymentUrl });
   } catch (error) {
-    console.error('Order fetch error:', {
+    console.error('[ORDER POST ERROR]', {
       message: error.message,
       stack: error.stack,
       userId,
-      queryParams: { page, limit, offset },
+      artworkId
     });
-    res.status(500).json({ error: 'Internal server error', details: error.message });
+    res.status(500).json({ error: 'Failed to create order', details: error.message });
+  } finally {
+    client.release();
+    console.log('[ORDER POST DEBUG] Database client released');
   }
 });
 
-app.get('/api/orders/:id', keycloak.protect(), authGetLimiter, async (req, res) => {
+// Update GET /api/orders to include payment_method
+router.get('/orders', keycloak.protect(), requireTrustLevel(TRUST_LEVELS.VERIFIED), async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub;
+  const { page = 1, limit = 10 } = req.query;
+  const parsedPage = parseInt(page);
+  const parsedLimit = parseInt(limit);
+
+  console.log('[ORDERS GET DEBUG] Request:', { userId, page, limit });
+
+  if (isNaN(parsedPage) || parsedPage < 1 || isNaN(parsedLimit) || parsedLimit < 1) {
+    console.log('[ORDERS GET ERROR] Invalid pagination params:', { page, limit });
+    return res.status(400).json({ error: 'Invalid page or limit' });
+  }
+
+  const client = await pool.connect();
   try {
-    const { rows } = await pool.query('SELECT * FROM orders WHERE order_id = $1', [req.params.id]);
-    if (rows.length === 0) return res.status(404).json({ error: 'Order not found' });
-    res.json(rows[0]);
+    console.log('[ORDERS GET DEBUG] Fetching user:', userId);
+    const { rows: userRows } = await client.query(
+      'SELECT user_id FROM users WHERE keycloak_id = $1',
+      [userId]
+    );
+    if (userRows.length === 0) {
+      console.log('[ORDERS GET ERROR] User not found:', userId);
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const dbUserId = userRows[0].user_id;
+
+    console.log('[ORDERS GET DEBUG] Counting orders for user:', dbUserId);
+    const { rows: countRows } = await client.query(
+      'SELECT COUNT(*) AS total FROM orders WHERE buyer_id = $1',
+      [dbUserId]
+    );
+    const total = parseInt(countRows[0].total);
+    const totalPages = Math.ceil(total / parsedLimit);
+    const offset = (parsedPage - 1) * parsedLimit;
+
+    console.log('[ORDERS GET DEBUG] Fetching orders:', { dbUserId, limit: parsedLimit, offset });
+    const { rows: orderRows } = await client.query(
+      `SELECT 
+         o.order_id, 
+         o.buyer_id, 
+         o.artwork_id, 
+         o.total_amount AS price, 
+         o.status, 
+         o.created_at, 
+         o.payment_status,
+         o.payment_method,
+         a.title AS artwork_title,
+         COALESCE(
+           '/uploads/artworks/' || SPLIT_PART(REPLACE(ai.image_path, '\\', '/'), '/', -1),
+           '/placeholder.jpg'
+         ) AS image_url
+       FROM orders o
+       JOIN artworks a ON o.artwork_id = a.artwork_id
+       LEFT JOIN artwork_images ai ON o.artwork_id = ai.artwork_id
+       WHERE o.buyer_id = $1
+       ORDER BY o.created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [dbUserId, parsedLimit, offset]
+    );
+    console.log('[ORDERS GET DEBUG] Orders fetched:', orderRows);
+
+    const response = {
+      orders: orderRows.map(row => ({
+        order_id: row.order_id,
+        artwork_id: row.artwork_id,
+        artwork_title: row.artwork_title,
+        price: parseFloat(row.price),
+        status: row.status,
+        created_at: row.created_at,
+        image_url: row.image_url,
+        payment_status: row.payment_status,
+        payment_method: row.payment_method
+      })),
+      pagination: {
+        page: parsedPage,
+        limit: parsedLimit,
+        total,
+        totalPages
+      }
+    };
+
+    console.log('[ORDERS GET SUCCESS] Response:', response);
+    res.status(200).json(response);
   } catch (error) {
-    res.status(500).json({ error: 'Database error', details: error.message });
+    console.error('[ORDERS GET ERROR]', {
+      message: error.message,
+      stack: error.stack,
+      code: error.code,
+      detail: error.detail,
+      userId
+    });
+    res.status(500).json({ error: 'Failed to fetch orders', details: error.message });
+  } finally {
+    client.release();
+    console.log('[ORDERS GET DEBUG] Database client released');
   }
 });
 
@@ -1596,95 +1712,197 @@ app.get('/api/order-items/:order_id', keycloak.protect(), authGetLimiter, async 
 
 // --- Payment Routes ---
 
+// PayPal Webhook
 app.post('/api/payments', keycloak.protect(), authPostLimiter, async (req, res) => {
   const { order_id, amount, payment_method, phone_number } = req.body;
+  const client = await pool.connect();
   try {
+    console.log('[PAYMENTS POST DEBUG] Request:', { order_id, amount, payment_method, phone_number });
+
     if (!order_id || !amount || !payment_method) {
+      console.log('[PAYMENTS POST ERROR] Missing fields:', { order_id, amount, payment_method });
       return res.status(400).json({ error: 'Missing required fields: order_id, amount, or payment_method' });
     }
     if (typeof amount !== 'number' || amount <= 0) {
+      console.log('[PAYMENTS POST ERROR] Invalid amount:', amount);
       return res.status(400).json({ error: 'Amount must be a positive number' });
     }
     if ((payment_method === 'orange_money' || payment_method === 'myzaka') && !phone_number) {
+      console.log('[PAYMENTS POST ERROR] Missing phone_number for mobile money');
       return res.status(400).json({ error: 'Phone number is required for mobile money payments' });
+    }
+
+    // Verify order exists and matches amount
+    const { rows: orderRows } = await client.query(
+      'SELECT total_amount FROM orders WHERE order_id = $1',
+      [order_id]
+    );
+    if (orderRows.length === 0) {
+      console.log('[PAYMENTS POST ERROR] Order not found:', order_id);
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    if (Math.abs(orderRows[0].total_amount - amount) > 0.01) {
+      console.log('[PAYMENTS POST ERROR] Amount mismatch:', { order_amount: orderRows[0].total_amount, requested_amount: amount });
+      return res.status(400).json({ error: 'Amount does not match order total' });
     }
 
     let paymentUrl, paymentRef;
 
     if (payment_method === 'paypal') {
-      try {
-        const response = await axios.post(
-          'https://api.sandbox.paypal.com/v1/payments/payment',
-          {
-            intent: 'sale',
-            payer: { payment_method: 'paypal' },
-            transactions: [{ amount: { total: amount.toFixed(2), currency: 'BWP' }, description: 'Artwork Purchase' }],
-            redirect_urls: { return_url: `${process.env.APP_URL}/payment-callback`, cancel_url: `${process.env.APP_URL}/payment-cancel` },
+  try {
+    const request = new paypal.orders.OrdersCreateRequest();
+    request.prefer('return=representation');
+    const orderBody = {
+      intent: 'CAPTURE',
+      purchase_units: [
+        {
+          amount: {
+            currency_code: 'USD',
+            value: amount.toFixed(2)
           },
-          {
-            headers: {
-              Authorization: `Basic ${Buffer.from(`${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_SECRET}`).toString('base64')}`,
-              'Content-Type': 'application/json',
-            },
-          }
-        );
-        paymentUrl = response.data.links.find(link => link.rel === 'approval_url').href;
-        paymentRef = response.data.id;
-      } catch (error) {
-        console.error('PayPal API error:', error.message);
-        return res.status(503).json({ error: 'PayPal service unavailable' });
+          description: `Artwork Purchase for Order ${order_id}`
+        }
+      ],
+      application_context: {
+        return_url: `${process.env.APP_URL}/payment-callback`,
+        cancel_url: `${process.env.APP_URL}/payment-cancel`
       }
-    } else if (payment_method === 'orange_money' || payment_method === 'myzaka') {
+    };
+    console.log('[PAYMENTS POST PAYPAL BODY DEBUG] Order body:', JSON.stringify(orderBody, null, 2));
+    request.body = orderBody; // Using direct body set
+    console.log('[PAYMENTS POST PAYPAL DEBUG] Sending PayPal request:', {
+      clientId: process.env.PAYPAL_CLIENT_ID ? 'set' : 'unset',
+      clientSecret: process.env.PAYPAL_CLIENT_SECRET ? 'set' : 'unset',
+      requestBody: request.body
+    });
+    const response = await paypalClient.execute(request);
+    paymentRef = response.result.id;
+    paymentUrl = response.result.links.find(link => link.rel === 'approve').href;
+    console.log('[PAYMENTS POST PAYPAL] Created order:', { paymentRef, paymentUrl });
+
+    // Dynamic column handling
+    const columns = ['order_id', 'amount', 'status', 'payment_url', 'payment_ref'];
+    const values = [order_id, amount, 'pending', paymentUrl, paymentRef];
+    const placeholders = ['$1', '$2', '$3', '$4', '$5'];
+    
+    // Add payment_method if column exists
+    try {
+      await client.query('SELECT payment_method FROM payments LIMIT 1');
+      columns.push('payment_method');
+      values.push(payment_method);
+      placeholders.push(`$${placeholders.length + 1}`);
+    } catch (e) {
+      console.warn('[PAYMENTS POST DB WARN] payment_method column not found, skipping');
+    }
+
+    // Add original_amount and original_currency if columns exist
+    try {
+      await client.query('SELECT original_amount, original_currency FROM payments LIMIT 1');
+      columns.push('original_amount', 'original_currency');
+      values.push(amount, 'BWP');
+      placeholders.push(`$${placeholders.length + 1}`, `$${placeholders.length + 2}`);
+    } catch (e) {
+      console.warn('[PAYMENTS POST DB WARN] original_amount/original_currency columns not found, skipping');
+    }
+
+    const queryText = `INSERT INTO payments (${columns.join(', ')}) VALUES (${placeholders.join(', ')}) RETURNING payment_id`;
+    console.log('[PAYMENTS POST DB DEBUG] Insert query:', queryText, values);
+    const { rows } = await client.query(queryText, values);
+    console.log('[PAYMENTS POST DB SUCCESS] Payment inserted:', rows[0].payment_id);
+
+  } catch (error) {
+    console.error('[PAYMENTS POST PAYPAL ERROR]', {
+      message: error.message,
+      response: error.response?.data,
+      status: error.response?.status,
+      stack: error.stack,
+      config: {
+        clientId: process.env.PAYPAL_CLIENT_ID ? 'set' : 'unset',
+        clientSecret: process.env.PAYPAL_CLIENT_SECRET ? 'set' : 'unset'
+      }
+    });
+    return res.status(500).json({ error: 'Failed to initiate payment', details: error.message });
+  }
+} else if (payment_method === 'orange_money' || payment_method === 'myzaka') {
       const ussdCode = payment_method === 'orange_money' ? '*145#' : '*167#';
       paymentRef = `${payment_method}-${order_id}-${Date.now()}`;
-      paymentUrl = `Please complete payment via USSD: ${ussdCode}`;
+      paymentUrl = `/mock-payment/${paymentRef}`;
+      console.log(`[PAYMENTS POST ${payment_method.toUpperCase()}] Mocked payment:`, { paymentRef, paymentUrl });
     } else {
+      console.log('[PAYMENTS POST ERROR] Unsupported payment method:', payment_method);
       return res.status(400).json({ error: 'Unsupported payment method' });
     }
 
-    const { rows } = await pool.query(
-      'INSERT INTO payments (order_id, amount, status, payment_method, payment_url, payment_ref) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+    const { rows } = await client.query(
+      'INSERT INTO payments (order_id, amount, status, payment_method, payment_url, payment_ref) VALUES ($1, $2, $3, $4, $5, $6) RETURNING payment_id',
       [order_id, amount, 'pending', payment_method, paymentUrl, paymentRef]
     );
-    console.log('Payment initiated:', { payment_id: rows[0].payment_id, paymentRef });
+    // Update orders table for consistency
+    await client.query(
+      'UPDATE orders SET payment_status = $1, payment_method = $2, payment_id = $3 WHERE order_id = $4',
+      ['pending', payment_method, paymentRef, order_id]
+    );
+
+    console.log('[PAYMENTS POST SUCCESS] Payment initiated:', { payment_id: rows[0].payment_id, paymentRef });
     res.status(201).json({ paymentUrl });
   } catch (error) {
-    console.error('Payment initiation error:', error.message);
+    console.error('[PAYMENTS POST ERROR]', { message: error.message, stack: error.stack });
     res.status(500).json({ error: 'Failed to initiate payment', details: error.message });
+  } finally {
+    client.release();
   }
 });
 
 app.get('/api/payments/:order_id', keycloak.protect(), authGetLimiter, async (req, res) => {
   try {
+    console.log('[PAYMENTS GET DEBUG] Fetching payments for order:', req.params.order_id);
     const { rows } = await pool.query('SELECT * FROM payments WHERE order_id = $1', [req.params.order_id]);
+    console.log('[PAYMENTS GET SUCCESS] Payments:', rows);
     res.json(rows);
   } catch (error) {
+    console.error('[PAYMENTS GET ERROR]', error.message);
     res.status(500).json({ error: 'Database error', details: error.message });
   }
 });
 
 app.put('/api/payments/:id/status', keycloak.protect('realm:admin'), authPutLimiter, async (req, res) => {
   const { status } = req.body;
+  const client = await pool.connect();
   try {
-    const { rows } = await pool.query(
+    console.log('[PAYMENTS PUT DEBUG] Updating payment status:', { payment_id: req.params.id, status });
+    if (!['pending', 'completed', 'failed'].includes(status)) {
+      console.log('[PAYMENTS PUT ERROR] Invalid status:', status);
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+
+    await client.query('BEGIN');
+    const { rows } = await client.query(
       'UPDATE payments SET status = $1 WHERE payment_id = $2 RETURNING order_id',
       [status, req.params.id]
     );
-    if (rows.length === 0) return res.status(404).json({ error: 'Payment not found' });
+    if (rows.length === 0) {
+      console.log('[PAYMENTS PUT ERROR] Payment not found:', req.params.id);
+      return res.status(404).json({ error: 'Payment not found' });
+    }
+
+    const orderId = rows[0].order_id;
+    await client.query(
+      'UPDATE orders SET payment_status = $1 WHERE order_id = $2',
+      [status, orderId]
+    );
 
     if (status === 'completed') {
-      const orderId = rows[0].order_id;
-      const { rows: orderRows } = await pool.query(
+      const { rows: orderRows } = await client.query(
         'SELECT artwork_id FROM orders WHERE order_id = $1',
         [orderId]
       );
       const artworkId = orderRows[0].artwork_id;
-      const { rows: artworkRows } = await pool.query(
+      const { rows: artworkRows } = await client.query(
         'SELECT artist_id FROM artworks WHERE artwork_id = $1',
         [artworkId]
       );
       const artistId = artworkRows[0].artist_id;
-      const { rows: userRows } = await pool.query(
+      const { rows: userRows } = await client.query(
         'SELECT email FROM users WHERE keycloak_id = $1',
         [artistId]
       );
@@ -1699,15 +1917,21 @@ app.put('/api/payments/:id/status', keycloak.protect('realm:admin'), authPutLimi
       const system_user_id = process.env.SYSTEM_USER_ID;
       if (!system_user_id) throw new Error('SYSTEM_USER_ID not configured');
       const messageContent = 'Your artwork has been sold and payment is complete. Please fulfill the order.';
-      await pool.query(
+      await client.query(
         'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3)',
         [system_user_id, artistId, messageContent]
       );
     }
+
+    await client.query('COMMIT');
+    console.log('[PAYMENTS PUT SUCCESS] Status updated:', { payment_id: req.params.id, status });
     res.json(rows[0]);
   } catch (error) {
-    console.error('Payment status update error:', error.message);
+    await client.query('ROLLBACK');
+    console.error('[PAYMENTS PUT ERROR]', error.message);
     res.status(500).json({ error: 'Database or notification error', details: error.message });
+  } finally {
+    client.release();
   }
 });
 
@@ -1715,21 +1939,33 @@ app.post('/api/payments/confirm', keycloak.protect(), orderLimiter, async (req, 
   const { order_id, transaction_ref } = req.body;
   const client = await pool.connect();
   try {
+    console.log('[PAYMENTS CONFIRM DEBUG] Confirming payment:', { order_id, transaction_ref });
     if (!order_id || !transaction_ref) {
+      console.log('[PAYMENTS CONFIRM ERROR] Missing fields:', { order_id, transaction_ref });
       return res.status(400).json({ error: 'Missing order_id or transaction_ref' });
     }
     if (!transaction_ref.startsWith('orange_money-') && !transaction_ref.startsWith('myzaka-')) {
+      console.log('[PAYMENTS CONFIRM ERROR] Invalid transaction reference:', transaction_ref);
       return res.status(400).json({ error: 'Invalid transaction reference' });
     }
 
     await client.query('BEGIN');
     const { rows } = await client.query(
-      'UPDATE payments SET status = $1, payment_ref = $2 WHERE order_id = $3 RETURNING order_id',
+      'UPDATE payments SET status = $1, payment_ref = $2 WHERE order_id = $3 RETURNING order_id, payment_method',
       ['completed', transaction_ref, order_id]
     );
-    if (rows.length === 0) return res.status(404).json({ error: 'Payment not found' });
+    if (rows.length === 0) {
+      console.log('[PAYMENTS CONFIRM ERROR] Payment not found:', order_id);
+      return res.status(404).json({ error: 'Payment not found' });
+    }
 
     const orderId = rows[0].order_id;
+    const paymentMethod = rows[0].payment_method;
+    await client.query(
+      'UPDATE orders SET payment_status = $1 WHERE order_id = $2',
+      ['completed', orderId]
+    );
+
     const { rows: orderRows } = await client.query(
       'SELECT artwork_id, buyer_id FROM orders WHERE order_id = $1',
       [orderId]
@@ -1771,14 +2007,65 @@ app.post('/api/payments/confirm', keycloak.protect(), orderLimiter, async (req, 
     await sendEmail(buyerEmail, 'Payment Confirmation', buyerEmailHtml);
 
     await client.query('COMMIT');
+    console.log('[PAYMENTS CONFIRM SUCCESS] Payment confirmed:', { order_id, transaction_ref });
     res.status(200).json({ message: 'Payment confirmed' });
   } catch (error) {
     await client.query('ROLLBACK');
-    console.error('USSD confirmation error:', error.message);
+    console.error('[PAYMENTS CONFIRM ERROR]', error.message);
     res.status(500).json({ error: 'Confirmation failed', details: error.message });
   } finally {
     client.release();
   }
+});
+
+// PayPal Webhook
+app.post('/webhook/paypal', express.raw({ type: 'application/json' }), async (req, res) => {
+  const webhookEvent = req.body;
+  try {
+    console.log('[PAYPAL WEBHOOK DEBUG] Event:', webhookEvent.event_type);
+    if (webhookEvent.event_type === 'CHECKOUT.ORDER.APPROVED') {
+      const paymentRef = webhookEvent.resource.id;
+      const client = await pool.connect();
+      try {
+        const { rows } = await client.query(
+          'UPDATE payments SET status = $1 WHERE payment_ref = $2 RETURNING order_id',
+          ['completed', paymentRef]
+        );
+        if (rows.length > 0) {
+          await client.query(
+            'UPDATE orders SET payment_status = $1 WHERE order_id = $2',
+            ['completed', rows[0].order_id]
+          );
+          console.log('[PAYPAL WEBHOOK SUCCESS] Payment completed:', { paymentRef, order_id: rows[0].order_id });
+        }
+      } finally {
+        client.release();
+      }
+    }
+    res.status(200).send('Webhook received');
+  } catch (error) {
+    console.error('[PAYPAL WEBHOOK ERROR]', error);
+    res.status(400).send('Webhook error');
+  }
+});
+
+// Mock Payment Page
+app.get('/mock-payment/:paymentRef', (req, res) => {
+  const { paymentRef } = req.params;
+  const paymentMethod = paymentRef.startsWith('orange_money-') ? 'Orange Money' : 'MyZaka';
+  const ussdCode = paymentMethod === 'Orange Money' ? '*145#' : '*167#';
+  res.send(`
+    <h1>${paymentMethod} Payment</h1>
+    <p>Order Reference: ${paymentRef}</p>
+    <p>Please complete payment via USSD: ${ussdCode}</p>
+    <p>After payment, confirm with transaction reference: ${paymentRef}</p>
+    <form action="/api/payments/confirm" method="POST">
+      <input type="hidden" name="order_id" value="${paymentRef.split('-')[1]}">
+      <input type="text" name="transaction_ref" value="${paymentRef}" readonly>
+      <button type="submit">Confirm Payment</button>
+    </form>
+    <a href="/orders">Back to Orders</a>
+  `);
 });
 
 // --- Review Routes ---
