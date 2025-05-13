@@ -26,9 +26,15 @@ const { pool } = require('./db');
 const { sendVerificationEmail, sendEmail } = require('./services/emailService');
 const { createVerificationCode, verifyCode } = require('./services/verificationService');
 const { verifyRecaptcha } = require('./services/recaptchaService');
+// Ensure uploads folder exists
 const fs = require('fs');
+if (!fs.existsSync('uploads')) {
+  fs.mkdirSync('uploads');
+}
 const fsPromises = fs.promises;
 const router = express.Router();
+
+const mime = require('mime-types'); 
 
 const paypal = require('@paypal/checkout-server-sdk');
 const environment = new paypal.core.SandboxEnvironment(process.env.PAYPAL_CLIENT_ID, process.env.PAYPAL_CLIENT_SECRET);
@@ -123,12 +129,27 @@ const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json');
 
   // Multer setup for general uploads (artworks)
   const storage = multer.diskStorage({
-    destination: path.join(__dirname, 'Uploads', 'artworks'),
+    destination: (req, file, cb) => {
+      cb(null, 'uploads/'); // Ensure this folder exists
+    },
     filename: (req, file, cb) => {
-      cb(null, `${Date.now()}${path.extname(file.originalname)}`);
+      const ext = path.extname(file.originalname);
+      cb(null, `${req.kauth.grant.access_token.content.sub}-${Date.now()}${ext}`);
     },
   });
-  const upload = multer({ storage });
+  const upload = multer({
+    storage,
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+    fileFilter: (req, file, cb) => {
+      const filetypes = /jpeg|jpg|png/;
+      const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+      const mimetype = filetypes.test(file.mimetype);
+      if (extname && mimetype) {
+        return cb(null, true);
+      }
+      cb(new Error('Only JPEG/PNG images allowed'));
+    },
+  });
 
   // Multer setup for artist verification
   const artistStorage = multer.diskStorage({
@@ -912,8 +933,8 @@ app.post('/api/users/me/photo', keycloak.protect(), authPostLimiter, profileUplo
     if (rows.length === 0) {
       return res.status(404).json({ error: 'User not found' });
     }
-    // Return full URL for frontend
     const photoUrl = `http://localhost:3000/api/users/${userId}/photo`;
+    console.log('Uploaded file:', req.file);
     res.json({ message: 'Profile photo uploaded', pictureUrl: photoUrl });
   } catch (error) {
     console.error('Profile photo upload error:', error.message);
@@ -952,26 +973,56 @@ app.put('/api/profile', keycloak.protect(), authPutLimiter, async (req, res) => 
 app.get('/api/users/:userId/photo', publicDataLimiter, async (req, res) => {
   try {
     const { userId } = req.params;
+    console.log('Serving photo for userId:', userId);
+
+    // Validate UUID
+    if (!isValidUUID(userId)) {
+      console.warn('Invalid userId format:', userId);
+      return res.status(400).json({ error: 'Invalid user ID format' });
+    }
+
+    // Fetch profile photo path
     const { rows } = await pool.query(
       'SELECT profile_photo FROM users WHERE keycloak_id = $1 AND status != $2',
       [userId, 'deleted']
     );
     if (!rows.length || !rows[0].profile_photo) {
+      console.warn('No profile photo found for userId:', userId);
       return res.status(404).json({ error: 'Photo not found' });
     }
 
-    const filePath = path.resolve(__dirname, rows[0].profile_photo);
-    await fs.access(filePath, fs.constants.R_OK);
-    res.setHeader('Content-Type', mime.lookup(filePath) || 'image/jpeg');
+    // Resolve file path
+    const photoPath = rows[0].profile_photo.replace(/\\/g, '/'); // Normalize slashes
+    const filePath = path.resolve(__dirname, photoPath);
+    console.log('Resolved filePath:', filePath);
+
+    // Check file existence and readability using fsPromises
+    try {
+      await fsPromises.access(filePath, fs.constants.R_OK);
+      console.log('File accessible:', filePath);
+    } catch (err) {
+      console.error('File access error:', { filePath, error: err.message });
+      return res.status(404).json({ error: 'Photo file not found or inaccessible' });
+    }
+
+    // Set headers
+    const contentType = mime.lookup(filePath) || 'image/jpeg';
+    res.setHeader('Content-Type', contentType);
     res.setHeader('Access-Control-Allow-Origin', 'http://localhost:3001');
-    const stream = require('fs').createReadStream(filePath);
-    stream.on('error', (err) => {
-      console.error('Stream error:', { filePath, error: err.message });
-      res.status(500).json({ error: 'Failed to stream photo' });
+    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization,Content-Type');
+
+    // Serve file with callback
+    res.sendFile(filePath, (err) => {
+      if (err) {
+        console.error('SendFile error:', { filePath, error: err.message });
+        res.status(500).json({ error: 'Failed to serve photo', details: err.message });
+      } else {
+        console.log('Photo served successfully:', filePath);
+      }
     });
-    stream.pipe(res);
   } catch (error) {
-    console.error('Serve photo error:', error.message);
+    console.error('Serve photo error:', { message: error.message, stack: error.stack });
     res.status(500).json({ error: 'Server error', details: error.message });
   }
 });
