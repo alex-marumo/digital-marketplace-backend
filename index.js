@@ -871,6 +871,30 @@ app.put('/api/users/me', keycloak.protect(), authPutLimiter, async (req, res) =>
     console.error('Update User Error:', error);
     res.status(500).json({ error: 'Database error', details: error.message });
   }
+  const adminTokenResponse = await axios.post(
+  `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
+  new URLSearchParams({
+    grant_type: 'client_credentials',
+    client_id: process.env.KEYCLOAK_CLIENT_ID,
+    client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
+  }),
+  { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+);
+
+await axios.put(
+  `${process.env.KEYCLOAK_URL}/admin/realms/${process.env.KEYCLOAK_REALM}/users/${userId}`,
+  {
+    firstName: name.split(' ')[0],
+    lastName: name.split(' ')[1] || '',
+    email,
+  },
+  {
+    headers: {
+      Authorization: `Bearer ${adminTokenResponse.data.access_token}`,
+      'Content-Type': 'application/json',
+    },
+  }
+);
 });
 
 // Profile Photo Upload
@@ -1715,6 +1739,7 @@ app.get('/api/order-items/:order_id', keycloak.protect(), authGetLimiter, async 
 // PayPal Webhook
 app.post('/api/payments', keycloak.protect(), authPostLimiter, async (req, res) => {
   const { order_id, amount, payment_method, phone_number } = req.body;
+  const currency = payment_method === 'paypal' ? 'USD' : 'BWP';
   const client = await pool.connect();
   try {
     console.log('[PAYMENTS POST DEBUG] Request:', { order_id, amount, payment_method, phone_number });
@@ -1749,102 +1774,108 @@ app.post('/api/payments', keycloak.protect(), authPostLimiter, async (req, res) 
     let paymentUrl, paymentRef;
 
     if (payment_method === 'paypal') {
-  try {
-    const request = new paypal.orders.OrdersCreateRequest();
-    request.prefer('return=representation');
-    const orderBody = {
-      intent: 'CAPTURE',
-      purchase_units: [
-        {
-          amount: {
-            currency_code: 'USD',
-            value: amount.toFixed(2)
-          },
-          description: `Artwork Purchase for Order ${order_id}`
+      try {
+        const request = new paypal.orders.OrdersCreateRequest();
+        request.prefer('return=representation');
+        const orderBody = {
+          intent: 'CAPTURE',
+          purchase_units: [
+            {
+              amount: {
+                currency_code: 'USD',
+                value: amount.toFixed(2)
+              },
+              description: `Artwork Purchase for Order ${order_id}`
+            }
+          ],
+          application_context: {
+            return_url: `${process.env.APP_URL}/payment-callback`,
+            cancel_url: `${process.env.APP_URL}/payment-cancel`
+          }
+        };
+        console.log('[PAYMENTS POST PAYPAL BODY DEBUG] Order body:', JSON.stringify(orderBody, null, 2));
+        request.body = orderBody;
+        console.log('[PAYMENTS POST PAYPAL DEBUG] Sending PayPal request:', {
+          clientId: process.env.PAYPAL_CLIENT_ID ? 'set' : 'unset',
+          clientSecret: process.env.PAYPAL_CLIENT_SECRET ? 'set' : 'unset'
+        });
+        const response = await paypalClient.execute(request);
+        paymentRef = response.result.id;
+        paymentUrl = response.result.links.find(link => link.rel === 'approve').href;
+        console.log('[PAYMENTS POST PAYPAL] Created order:', { paymentRef, paymentUrl });
+
+        // Dynamic column handling
+        const columns = ['order_id', 'amount', 'status', 'payment_url', 'payment_ref'];
+        const values = [order_id, amount, 'pending', paymentUrl, paymentRef];
+        const placeholders = ['$1', '$2', '$3', '$4', '$5'];
+
+        // Add payment_method if column exists
+        try {
+          await client.query('SELECT payment_method FROM payments LIMIT 1');
+          columns.push('payment_method');
+          values.push(payment_method);
+          placeholders.push(`$${placeholders.length + 1}`);
+        } catch (e) {
+          console.warn('[PAYMENTS POST DB WARN] payment_method column not found, skipping');
         }
-      ],
-      application_context: {
-        return_url: `${process.env.APP_URL}/payment-callback`,
-        cancel_url: `${process.env.APP_URL}/payment-cancel`
+
+        // Add original_amount and original_currency if columns exist
+        try {
+          await client.query('SELECT original_amount, original_currency FROM payments LIMIT 1');
+          columns.push('original_amount', 'original_currency');
+          values.push(amount, 'BWP');
+          placeholders.push(`$${placeholders.length + 1}`, `$${placeholders.length + 2}`);
+        } catch (e) {
+          console.warn('[PAYMENTS POST DB WARN] original_amount/original_currency columns not found, skipping');
+        }
+
+        const queryText = `INSERT INTO payments (${columns.join(', ')}) VALUES (${placeholders.join(', ')}) RETURNING payment_id`;
+        console.log('[PAYMENTS POST DB DEBUG] Insert query:', queryText, values);
+        const { rows } = await client.query(queryText, values);
+        const paymentId = rows[0].payment_id;
+        console.log('[PAYMENTS POST DB SUCCESS] Payment inserted:', paymentId);
+
+        // Update orders table for consistency
+        await client.query(
+          'UPDATE orders SET payment_status = $1, payment_method = $2, payment_id = $3 WHERE order_id = $4',
+          ['pending', payment_method, paymentRef, order_id]
+        );
+
+        console.log('[PAYMENTS POST SUCCESS] Payment initiated:', { payment_id: paymentId, paymentRef });
+        res.status(201).json({ paymentUrl });
+      } catch (error) {
+        console.error('[PAYMENTS POST PAYPAL ERROR]', {
+          message: error.message,
+          response: error.response?.data,
+          status: error.response?.status,
+          stack: error.stack
+        });
+        return res.status(500).json({ error: 'Failed to initiate payment', details: error.message });
       }
-    };
-    console.log('[PAYMENTS POST PAYPAL BODY DEBUG] Order body:', JSON.stringify(orderBody, null, 2));
-    request.body = orderBody; // Using direct body set
-    console.log('[PAYMENTS POST PAYPAL DEBUG] Sending PayPal request:', {
-      clientId: process.env.PAYPAL_CLIENT_ID ? 'set' : 'unset',
-      clientSecret: process.env.PAYPAL_CLIENT_SECRET ? 'set' : 'unset',
-      requestBody: request.body
-    });
-    const response = await paypalClient.execute(request);
-    paymentRef = response.result.id;
-    paymentUrl = response.result.links.find(link => link.rel === 'approve').href;
-    console.log('[PAYMENTS POST PAYPAL] Created order:', { paymentRef, paymentUrl });
-
-    // Dynamic column handling
-    const columns = ['order_id', 'amount', 'status', 'payment_url', 'payment_ref'];
-    const values = [order_id, amount, 'pending', paymentUrl, paymentRef];
-    const placeholders = ['$1', '$2', '$3', '$4', '$5'];
-    
-    // Add payment_method if column exists
-    try {
-      await client.query('SELECT payment_method FROM payments LIMIT 1');
-      columns.push('payment_method');
-      values.push(payment_method);
-      placeholders.push(`$${placeholders.length + 1}`);
-    } catch (e) {
-      console.warn('[PAYMENTS POST DB WARN] payment_method column not found, skipping');
-    }
-
-    // Add original_amount and original_currency if columns exist
-    try {
-      await client.query('SELECT original_amount, original_currency FROM payments LIMIT 1');
-      columns.push('original_amount', 'original_currency');
-      values.push(amount, 'BWP');
-      placeholders.push(`$${placeholders.length + 1}`, `$${placeholders.length + 2}`);
-    } catch (e) {
-      console.warn('[PAYMENTS POST DB WARN] original_amount/original_currency columns not found, skipping');
-    }
-
-    const queryText = `INSERT INTO payments (${columns.join(', ')}) VALUES (${placeholders.join(', ')}) RETURNING payment_id`;
-    console.log('[PAYMENTS POST DB DEBUG] Insert query:', queryText, values);
-    const { rows } = await client.query(queryText, values);
-    console.log('[PAYMENTS POST DB SUCCESS] Payment inserted:', rows[0].payment_id);
-
-  } catch (error) {
-    console.error('[PAYMENTS POST PAYPAL ERROR]', {
-      message: error.message,
-      response: error.response?.data,
-      status: error.response?.status,
-      stack: error.stack,
-      config: {
-        clientId: process.env.PAYPAL_CLIENT_ID ? 'set' : 'unset',
-        clientSecret: process.env.PAYPAL_CLIENT_SECRET ? 'set' : 'unset'
-      }
-    });
-    return res.status(500).json({ error: 'Failed to initiate payment', details: error.message });
-  }
-} else if (payment_method === 'orange_money' || payment_method === 'myzaka') {
+    } else if (payment_method === 'orange_money' || payment_method === 'myzaka') {
       const ussdCode = payment_method === 'orange_money' ? '*145#' : '*167#';
       paymentRef = `${payment_method}-${order_id}-${Date.now()}`;
       paymentUrl = `/mock-payment/${paymentRef}`;
       console.log(`[PAYMENTS POST ${payment_method.toUpperCase()}] Mocked payment:`, { paymentRef, paymentUrl });
+
+      const { rows } = await client.query(
+        'INSERT INTO payments (order_id, amount, status, payment_method, payment_url, payment_ref) VALUES ($1, $2, $3, $4, $5, $6) RETURNING payment_id',
+        [order_id, amount, 'pending', payment_method, paymentUrl, paymentRef]
+      );
+      const paymentId = rows[0].payment_id; // ✅ Moved after query
+
+      // Update orders table for consistency
+      await client.query(
+        'UPDATE orders SET payment_status = $1, payment_method = $2, payment_id = $3 WHERE order_id = $4',
+        ['pending', payment_method, paymentRef, order_id]
+      );
+
+      console.log('[PAYMENTS POST SUCCESS] Payment initiated:', { payment_id: paymentId, paymentRef });
+      res.status(201).json({ paymentUrl });
     } else {
       console.log('[PAYMENTS POST ERROR] Unsupported payment method:', payment_method);
       return res.status(400).json({ error: 'Unsupported payment method' });
     }
-
-    const { rows } = await client.query(
-      'INSERT INTO payments (order_id, amount, status, payment_method, payment_url, payment_ref) VALUES ($1, $2, $3, $4, $5, $6) RETURNING payment_id',
-      [order_id, amount, 'pending', payment_method, paymentUrl, paymentRef]
-    );
-    // Update orders table for consistency
-    await client.query(
-      'UPDATE orders SET payment_status = $1, payment_method = $2, payment_id = $3 WHERE order_id = $4',
-      ['pending', payment_method, paymentRef, order_id]
-    );
-
-    console.log('[PAYMENTS POST SUCCESS] Payment initiated:', { payment_id: rows[0].payment_id, paymentRef });
-    res.status(201).json({ paymentUrl });
   } catch (error) {
     console.error('[PAYMENTS POST ERROR]', { message: error.message, stack: error.stack });
     res.status(500).json({ error: 'Failed to initiate payment', details: error.message });
@@ -2027,25 +2058,28 @@ app.post('/webhook/paypal', express.raw({ type: 'application/json' }), async (re
       const paymentRef = webhookEvent.resource.id;
       const client = await pool.connect();
       try {
+        if (payment_method !== 'paypal') {
         const { rows } = await client.query(
           'UPDATE payments SET status = $1 WHERE payment_ref = $2 RETURNING order_id',
           ['completed', paymentRef]
         );
-        if (rows.length > 0) {
-          await client.query(
-            'UPDATE orders SET payment_status = $1 WHERE order_id = $2',
-            ['completed', rows[0].order_id]
-          );
-          console.log('[PAYPAL WEBHOOK SUCCESS] Payment completed:', { paymentRef, order_id: rows[0].order_id });
-        }
-      } finally {
-        client.release();
       }
+      if (rows.length > 0) {
+        await client.query(
+          'UPDATE orders SET payment_status = $1 WHERE order_id = $2',
+          ['completed', rows[0].order_id]
+        );
+        console.log('[PAYPAL WEBHOOK SUCCESS] Payment completed:', { paymentRef, order_id: rows[0].order_id });
+      }
+    } finally {
+      client.release();
+    }
     }
     res.status(200).send('Webhook received');
   } catch (error) {
     console.error('[PAYPAL WEBHOOK ERROR]', error);
     res.status(400).send('Webhook error');
+    response: error.response?.data;
   }
 });
 
