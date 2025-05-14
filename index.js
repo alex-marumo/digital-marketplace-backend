@@ -875,6 +875,7 @@ app.put('/api/users/me', keycloak.protect(), authPutLimiter, async (req, res) =>
   const userId = req.kauth.grant.access_token.content.sub;
   const { name, email } = req.body;
   try {
+    // Update local database
     let query = 'UPDATE users SET';
     const values = [];
     
@@ -892,35 +893,47 @@ app.put('/api/users/me', keycloak.protect(), authPutLimiter, async (req, res) =>
 
     const { rows } = await pool.query(query, values);
     if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
+
+    // Update Keycloak
+    if (name || email) {
+      const adminTokenResponse = await axios.post(
+        `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
+        new URLSearchParams({
+          grant_type: 'client_credentials',
+          client_id: process.env.KEYCLOAK_CLIENT_ID,
+          client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
+        }),
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+      );
+
+      try {
+        await axios.put(
+          `${process.env.KEYCLOAK_URL}/admin/realms/${process.env.KEYCLOAK_REALM}/users/${userId}`,
+          {
+            firstName: name ? name.split(' ')[0] : undefined,
+            lastName: name ? name.split(' ')[1] || '' : undefined,
+            email,
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${adminTokenResponse.data.access_token}`,
+              'Content-Type': 'application/json',
+            },
+          }
+        );
+      } catch (keycloakError) {
+        if (keycloakError.response?.status === 409) {
+          return res.status(409).json({ error: 'Email already in use' });
+        }
+        throw keycloakError; // Rethrow other errors
+      }
+    }
+
     res.json({ message: 'Profile updated', user: rows[0] });
   } catch (error) {
-    console.error('Update User Error:', error);
-    res.status(500).json({ error: 'Database error', details: error.message });
+    console.error('Update User Error:', error.message);
+    res.status(500).json({ error: 'Database or Keycloak error', details: error.message });
   }
-  const adminTokenResponse = await axios.post(
-  `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
-  new URLSearchParams({
-    grant_type: 'client_credentials',
-    client_id: process.env.KEYCLOAK_CLIENT_ID,
-    client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
-  }),
-  { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-);
-
-await axios.put(
-  `${process.env.KEYCLOAK_URL}/admin/realms/${process.env.KEYCLOAK_REALM}/users/${userId}`,
-  {
-    firstName: name.split(' ')[0],
-    lastName: name.split(' ')[1] || '',
-    email,
-  },
-  {
-    headers: {
-      Authorization: `Bearer ${adminTokenResponse.data.access_token}`,
-      'Content-Type': 'application/json',
-    },
-  }
-);
 });
 
 // Profile Photo Upload
@@ -2741,6 +2754,11 @@ app.post('/api/artwork-images', keycloak.protect('realm:artist'), async (req, re
     console.error('❌ Artwork image error:', error.message);
     res.status(500).json({ error: 'Database error', details: error.message });
   }
+});
+
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err.message, err.stack);
+  res.status(500).json({ error: 'Something broke on the server', details: err.message });
 });
 
 // Start the server
