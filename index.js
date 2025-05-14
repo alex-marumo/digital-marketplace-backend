@@ -912,7 +912,8 @@ app.put('/api/users/me', keycloak.protect(), authPutLimiter, async (req, res) =>
           {
             firstName: name ? name.split(' ')[0] : undefined,
             lastName: name ? name.split(' ')[1] || '' : undefined,
-            email,
+            email: email || undefined,
+            username: email || undefined, // Sync username with email
           },
           {
             headers: {
@@ -921,6 +922,7 @@ app.put('/api/users/me', keycloak.protect(), authPutLimiter, async (req, res) =>
             },
           }
         );
+        console.log(`Updated Keycloak for user ${userId}: email=${email}, username=${email}`);
       } catch (keycloakError) {
         if (keycloakError.response?.status === 409) {
           return res.status(409).json({ error: 'Email already in use' });
