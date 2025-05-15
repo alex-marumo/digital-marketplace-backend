@@ -2157,18 +2157,29 @@ app.post('/api/payments', keycloak.protect(), authPostLimiter, async (req, res) 
       return res.status(400).json({ error: 'Phone number is required for mobile money payments' });
     }
 
-    // Verify order exists and matches amount
+    // Verify order exists, matches amount, and artwork is available
     const { rows: orderRows } = await client.query(
-      'SELECT total_amount FROM orders WHERE order_id = $1',
-      [order_id]
+      'SELECT total_amount, artwork_id FROM orders WHERE order_id = $1 AND payment_status = $2',
+      [order_id, 'pending']
     );
     if (orderRows.length === 0) {
-      console.log('[PAYMENTS POST ERROR] Order not found:', order_id);
-      return res.status(404).json({ error: 'Order not found' });
+      console.log('[PAYMENTS POST ERROR] Order not found or not pending:', order_id);
+      return res.status(404).json({ error: 'Order not found or not pending' });
     }
-    if (Math.abs(orderRows[0].total_amount - amount) > 0.01) {
-      console.log('[PAYMENTS POST ERROR] Amount mismatch:', { order_amount: orderRows[0].total_amount, requested_amount: amount });
+    const { total_amount, artwork_id } = orderRows[0];
+    if (Math.abs(total_amount - amount) > 0.01) {
+      console.log('[PAYMENTS POST ERROR] Amount mismatch:', { order_amount: total_amount, requested_amount: amount });
       return res.status(400).json({ error: 'Amount does not match order total' });
+    }
+
+    // Check artwork status
+    const { rows: artworkRows } = await client.query(
+      'SELECT status FROM artworks WHERE artwork_id = $1',
+      [artwork_id]
+    );
+    if (artworkRows.length === 0 || artworkRows[0].status !== 'available') {
+      console.log('[PAYMENTS POST ERROR] Artwork not available:', { artwork_id, status: artworkRows[0]?.status });
+      return res.status(409).json({ error: 'Artwork is already sold or not found' });
     }
 
     let paymentUrl, paymentRef;
@@ -2194,7 +2205,7 @@ app.post('/api/payments', keycloak.protect(), authPostLimiter, async (req, res) 
           }
         };
         console.log('[PAYMENTS POST PAYPAL BODY DEBUG] Order body:', JSON.stringify(orderBody, null, 2));
-        request.requestBody(orderBody); // Updated to use requestBody
+        request.requestBody(orderBody);
         console.log('[PAYMENTS POST PAYPAL DEBUG] Sending PayPal request:', {
           clientId: process.env.PAYPAL_CLIENT_ID ? 'set' : 'unset',
           clientSecret: process.env.PAYPAL_CLIENT_SECRET ? 'set' : 'unset'
@@ -2850,61 +2861,78 @@ app.get('/payment-callback', async (req, res) => {
   const { token, PayerID } = req.query; // token is PayPal order ID
   const client = await pool.connect();
   try {
-    console.log('[PAYMENT CALLBACK DEBUG] Handling success:', { token, PayerID });
+    console.log('[PAYMENT CALLBACK DEBUG] Initiating callback:', { token, PayerID, timestamp: new Date().toISOString() });
     if (!token || !PayerID) {
-      console.log('[PAYMENT CALLBACK ERROR] Missing parameters');
+      console.log('[PAYMENT CALLBACK ERROR] Missing token or PayerID:', { token, PayerID });
+      await client.query('ROLLBACK');
       return res.status(400).send('Missing payment parameters');
     }
 
     await client.query('BEGIN');
+    console.log('[PAYMENT CALLBACK DEBUG] Transaction started');
 
     // Find payment
     const { rows: paymentRows } = await client.query(
       'SELECT order_id, payment_id, amount FROM payments WHERE payment_ref = $1 AND payment_method = $2 AND status = $3',
       [token, 'paypal', 'pending']
     );
+    console.log('[PAYMENT CALLBACK DEBUG] Payment query result:', { paymentRows });
     if (paymentRows.length === 0) {
-      console.log('[PAYMENT CALLBACK ERROR] Payment not found or not pending:', token);
+      console.log('[PAYMENT CALLBACK ERROR] No pending payment found:', { token });
       await client.query('ROLLBACK');
       return res.status(404).send('Payment not found or already processed');
     }
     const { order_id, payment_id, amount } = paymentRows[0];
+    console.log('[PAYMENT CALLBACK DEBUG] Payment details:', { payment_id, order_id, amount });
 
     // Capture PayPal order
     const request = new paypal.orders.OrdersCaptureRequest(token);
     request.requestBody({});
     const response = await paypalClient.execute(request);
+    console.log('[PAYMENT CALLBACK DEBUG] PayPal capture response:', { status: response.result.status });
     if (response.result.status !== 'COMPLETED') {
-      console.log('[PAYMENT CALLBACK ERROR] Capture failed:', response.result);
+      console.log('[PAYMENT CALLBACK ERROR] PayPal capture failed:', { result: response.result });
       await client.query('ROLLBACK');
       return res.status(500).send('Payment capture failed');
     }
 
-    // Get artwork details
+    // Get order details
     const { rows: orderRows } = await client.query(
       'SELECT artwork_id, buyer_id FROM orders WHERE order_id = $1',
       [order_id]
     );
+    console.log('[PAYMENT CALLBACK DEBUG] Order query result:', { orderRows });
+    if (orderRows.length === 0) {
+      console.log('[PAYMENT CALLBACK ERROR] Order not found:', { order_id });
+      await client.query('ROLLBACK');
+      return res.status(404).send('Order not found');
+    }
     const { artwork_id, buyer_id } = orderRows[0];
+    console.log('[PAYMENT CALLBACK DEBUG] Order details:', { order_id, artwork_id, buyer_id });
+
+    // Verify artwork exists
     const { rows: artworkRows } = await client.query(
       'SELECT artist_id, title, status FROM artworks WHERE artwork_id = $1',
       [artwork_id]
     );
+    console.log('[PAYMENT CALLBACK DEBUG] Artwork query result:', { artworkRows });
     if (artworkRows.length === 0) {
-      console.log('[PAYMENT CALLBACK ERROR] Artwork not found:', artwork_id);
+      console.log('[PAYMENT CALLBACK ERROR] Artwork not found:', { artwork_id });
       await client.query('ROLLBACK');
       return res.status(404).send('Artwork not found');
     }
     const { artist_id, title: artworkTitle, status: artworkStatus } = artworkRows[0];
+    console.log('[PAYMENT CALLBACK DEBUG] Artwork details:', { artwork_id, title: artworkTitle, status: artworkStatus });
 
+    // Check if artwork is already sold
     if (artworkStatus === 'sold') {
-      console.log('[PAYMENT CALLBACK WARN] Artwork already sold, refunding:', artwork_id);
-      // Refund the payment
-      const refundRequest = new paypal.payments.CapturesRefundRequest(response.result.purchase_units[0].payments.captures[0].id);
-      refundRequest.requestBody({ amount: { currency_code: 'USD', value: amount } });
+      console.log('[PAYMENT CALLBACK WARN] Artwork already sold, refunding:', { artwork_id, artworkTitle });
+      const captureId = response.result.purchase_units[0].payments.captures[0].id;
+      const refundRequest = new paypal.payments.CapturesRefundRequest(captureId);
+      refundRequest.requestBody({ amount: { currency_code: 'USD', value: amount.toFixed(2) } });
       await paypalClient.execute(refundRequest);
+      console.log('[PAYMENT CALLBACK DEBUG] Refund executed:', { captureId });
 
-      // Update payment and order to cancelled
       await client.query(
         'UPDATE payments SET status = $1 WHERE payment_id = $2 AND payment_ref = $3',
         ['cancelled', payment_id, token]
@@ -2913,8 +2941,8 @@ app.get('/payment-callback', async (req, res) => {
         'UPDATE orders SET payment_status = $1 WHERE order_id = $2',
         ['cancelled', order_id]
       );
+      console.log('[PAYMENT CALLBACK DEBUG] Payment and order cancelled:', { payment_id, order_id });
 
-      // Notify buyer
       const { rows: buyerRows } = await client.query(
         'SELECT email FROM users WHERE user_id = $1',
         [buyer_id]
@@ -2926,99 +2954,105 @@ app.get('/payment-callback', async (req, res) => {
         <p>A refund has been issued. Check your PayPal account or contact support.</p>
       `;
       await sendEmail(buyerEmail, 'Payment Cancelled - Artwork Sold', buyerEmailHtml);
+      console.log('[PAYMENT CALLBACK DEBUG] Refund email sent:', { buyerEmail });
 
       await client.query('COMMIT');
-      console.log('[PAYMENT CALLBACK SUCCESS] Refunded for sold artwork:', { order_id, payment_id, payment_ref: token });
+      console.log('[PAYMENT CALLBACK SUCCESS] Refund completed:', { order_id, payment_id, payment_ref: token });
       return res.redirect('http://localhost:3001/orders?error=artwork_sold');
     }
 
-    // Update payment and order status
-    await client.query(
-      'UPDATE payments SET status = $1 WHERE payment_id = $2 AND payment_ref = $3',
+    // Update payment
+    const paymentUpdate = await client.query(
+      'UPDATE payments SET status = $1 WHERE payment_id = $2 AND payment_ref = $3 RETURNING payment_id, status',
       ['completed', payment_id, token]
     );
-    await client.query(
-      'UPDATE orders SET payment_status = $1 WHERE order_id = $2',
+    console.log('[PAYMENT CALLBACK DEBUG] Payment update result:', { paymentUpdate: paymentUpdate.rows });
+
+    // Update order
+    const orderUpdate = await client.query(
+      'UPDATE orders SET payment_status = $1 WHERE order_id = $2 RETURNING order_id, payment_status',
       ['completed', order_id]
     );
+    console.log('[PAYMENT CALLBACK DEBUG] Order update result:', { orderUpdate: orderUpdate.rows });
 
-    // Mark artwork as sold
-    await client.query(
-      'UPDATE artworks SET status = $1 WHERE artwork_id = $2',
+    // Update artwork
+    const artworkUpdate = await client.query(
+      'UPDATE artworks SET status = $1 WHERE artwork_id = $2 RETURNING artwork_id, status',
       ['sold', artwork_id]
     );
+    console.log('[PAYMENT CALLBACK DEBUG] Artwork update result:', { artworkUpdate: artworkUpdate.rows });
+    if (artworkUpdate.rows.length === 0) {
+      console.log('[PAYMENT CALLBACK ERROR] Artwork update failed, no rows affected:', { artwork_id });
+      await client.query('ROLLBACK');
+      return res.status(500).send('Failed to update artwork status');
+    }
 
-    // Fetch user emails
-    const { rows: artistRows } = await client.query(
-      'SELECT email, keycloak_id FROM users WHERE user_id = $1',
-      [artist_id]
+    // Get emails
+    const { rows: userRows } = await client.query(
+      'SELECT u1.email AS artist_email, u2.email AS buyer_email ' +
+      'FROM users u1, users u2 ' +
+      'WHERE u1.user_id = $1 AND u2.user_id = $2',
+      [artist_id, buyer_id]
     );
-    const { rows: buyerRows } = await client.query(
-      'SELECT email, keycloak_id, name FROM users WHERE user_id = $1',
-      [buyer_id]
-    );
-    const artistEmail = artistRows[0].email;
-    const artistKeycloakId = artistRows[0].keycloak_id;
-    const buyerEmail = buyerRows[0].email;
-    const buyerKeycloakId = buyerRows[0].keycloak_id;
+    console.log('[PAYMENT CALLBACK DEBUG] User emails query result:', { userRows });
+    const { artist_email: artistEmail, buyer_email: buyerEmail } = userRows[0];
 
     // Send emails
     const artistEmailHtml = `
       <h1>Artwork Sold!</h1>
-      <p>Your artwork "${artworkTitle}" has been sold and payment is complete. Please fulfill the order.</p>
+      <p>Your artwork "${artworkTitle}" (Order ${order_id}) has been sold!</p>
+      <p>Check your dashboard for details or contact the buyer.</p>
     `;
-    await sendEmail(artistEmail, 'Artwork Sale Completed', artistEmailHtml);
-
     const buyerEmailHtml = `
-      <h1>Payment Confirmed</h1>
-      <p>Your payment for "${artworkTitle}" (Order ${order_id}) is complete. Thank you for your purchase!</p>
+      <h1>Payment Successful!</h1>
+      <p>Your payment for "${artworkTitle}" (Order ${order_id}) was successful!</p>
+      <p>Check your orders for details or contact the artist.</p>
     `;
-    await sendEmail(buyerEmail, 'Payment Confirmation', buyerEmailHtml);
+    await Promise.all([
+      sendEmail(artistEmail, 'Artwork Sold', artistEmailHtml),
+      sendEmail(buyerEmail, 'Payment Successful', buyerEmailHtml)
+    ]);
+    console.log('[PAYMENT CALLBACK DEBUG] Emails sent:', { artistEmail, buyerEmail });
 
-    // Find or create thread for messaging
-    let { rows: threadRows } = await client.query(
-      `SELECT id FROM threads WHERE artwork_id = $1 AND user_id = $2 AND participant_id = $3`,
-      [artwork_id, buyerKeycloakId, artistKeycloakId]
+    // Create thread
+    const { rows: threadRows } = await client.query(
+      'INSERT INTO threads (user_id, participant_id, artwork_id, status) ' +
+      'VALUES ($1, $2, $3, $4) RETURNING id',
+      [buyer_id, artist_id, artwork_id, 'active']
     );
-    let threadId;
-    if (threadRows.length === 0) {
-      const { rows: insertThread } = await client.query(
-        `INSERT INTO threads (artwork_id, user_id, participant_id, status)
-         VALUES ($1, $2, $3, $4) RETURNING id`,
-        [artwork_id, buyerKeycloakId, artistKeycloakId, 'active']
-      );
-      threadId = insertThread[0].id;
-    } else {
-      threadId = threadRows[0].id;
-    }
+    const threadId = threadRows[0].id;
+    console.log('[PAYMENT CALLBACK DEBUG] Thread created:', { threadId });
 
     // Send messages
-    const system_user_id = process.env.SYSTEM_USER_ID;
-    if (!system_user_id) throw new Error('SYSTEM_USER_ID not configured');
-    const artistMessage = `Your artwork "${artworkTitle}" is sold and paid. Fulfill the order.`;
     await client.query(
-      `INSERT INTO messages (thread_id, sender_id, content, status)
-       VALUES ($1, $2, $3, $4)`,
-      [threadId, system_user_id, artistMessage, 'active']
+      'INSERT INTO messages (thread_id, sender_id, content, status) ' +
+      'VALUES ($1, $2, $3, $4), ($1, $2, $5, $4)',
+      [
+        threadId,
+        SYSTEM_USER_ID,
+        `Order ${order_id} has been created for "${artworkTitle}". Buyer can now communicate with the artist.`,
+        'active',
+        `Payment for "${artworkTitle}" has been completed successfully.`
+      ]
     );
-    const buyerMessage = `Your payment for "${artworkTitle}" is confirmed. Thank you for your purchase!`;
-    await client.query(
-      `INSERT INTO messages (thread_id, sender_id, content, status)
-       VALUES ($1, $2, $3, $4)`,
-      [threadId, system_user_id, buyerMessage, 'active']
-    );
+    console.log('[PAYMENT CALLBACK DEBUG] Messages sent:', { threadId });
 
     await client.query('COMMIT');
-    console.log('[PAYMENT CALLBACK SUCCESS] Payment completed:', { order_id, payment_id, payment_ref: token });
-
-    // Redirect to Orders page
-    res.redirect('http://localhost:3001/orders?success=true');
+    console.log('[PAYMENT CALLBACK SUCCESS] Payment processed:', {
+      order_id,
+      payment_id,
+      payment_ref: token,
+      artwork_id,
+      artwork_status: artworkUpdate.rows[0].status
+    });
+    return res.redirect('http://localhost:3001/orders?success=true');
   } catch (error) {
+    console.error('[PAYMENT CALLBACK ERROR] Unexpected error:', { error: error.message, stack: error.stack });
     await client.query('ROLLBACK');
-    console.error('[PAYMENT CALLBACK ERROR]', { message: error.message, stack: error.stack });
-    res.status(500).send('Error finalizing payment');
+    return res.status(500).send('Internal server error');
   } finally {
     client.release();
+    console.log('[PAYMENT CALLBACK DEBUG] Database client released');
   }
 });
 
