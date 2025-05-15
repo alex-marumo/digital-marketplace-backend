@@ -165,7 +165,6 @@ const upload = multer({
     }
   },
 });
-
   // Multer setup for artist verification
   const artistStorage = multer.diskStorage({
     destination: path.join(__dirname, 'Uploads', 'artist_verification'),
