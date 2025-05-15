@@ -18,11 +18,15 @@ const session = require('express-session');
 const { keycloak, sessionStore } = require('./keycloak');
 const axios = require('axios');
 const path = require('path');
+const { Pool } = require('pg');
+// Parse NUMERIC as float to avoid string output
+require('pg').types.setTypeParser(1700, parseFloat);
+const { pool } = require('./db');
 const multer = require('multer');
+const buildPath = path.join(__dirname, '..', 'digital-marketplace-frontend', 'build');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const swaggerUI = require('swagger-ui-express');
-const { pool } = require('./db');
 const { sendVerificationEmail, sendEmail } = require('./services/emailService');
 const { createVerificationCode, verifyCode } = require('./services/verificationService');
 const { verifyRecaptcha } = require('./services/recaptchaService');
@@ -39,7 +43,13 @@ const mime = require('mime-types');
 
 const paypal = require('@paypal/checkout-server-sdk');
 const environment = new paypal.core.SandboxEnvironment(process.env.PAYPAL_CLIENT_ID, process.env.PAYPAL_CLIENT_SECRET);
-const paypalClient = new paypal.core.PayPalHttpClient(environment);
+// PayPal client setup
+const paypalClient = new paypal.core.PayPalHttpClient(
+  new paypal.core.SandboxEnvironment(
+    process.env.PAYPAL_CLIENT_ID,
+    process.env.PAYPAL_CLIENT_SECRET
+  )
+);
 
 const { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter } = require('./middleware/rateLimiter');
 console.log('Rate Limiters:', { registrationLimiter, orderLimiter, publicDataLimiter, messageLimiter, artworkManagementLimiter, authGetLimiter, authPostLimiter, authPutLimiter, authDeleteLimiter });
@@ -78,7 +88,7 @@ const swaggerFile = path.join(__dirname, 'docs', 'openapi3_0.json');
   app.use(cors({ 
     origin: "http://localhost:3001",
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'], // ADD PATCH HERE
     allowedHeaders: ['Authorization', 'Content-Type']
   }));
 
@@ -285,7 +295,8 @@ app.post('/api/pre-register', registrationLimiter, async (req, res) => {
     await sendVerificationEmail(rows[0], code);
 
     res.status(201).json({ message: 'User registered, enter the code from your email in the app' });
-  } catch (error) {
+  }
+  catch (error) {
     console.error('Registration error:', {
       message: error.message,
       response: error.response ? {
@@ -342,6 +353,10 @@ app.post('/api/verify-email-code', registrationLimiter, async (req, res) => {
       [true, 'pending_role_selection', keycloakId]
     );
     console.log('Updated user status:', updatedUser[0].status);
+
+    // Update trust level to VERIFIED (2)
+    await updateTrustLevel(keycloakId, TRUST_LEVELS.VERIFIED);
+    console.log('Trust level set to VERIFIED for user:', keycloakId);
 
     res.json({ message: 'Email verified, please select your role' });
   } catch (error) {
@@ -1672,92 +1687,121 @@ router.post('/orders', keycloak.protect(), orderLimiter, requireTrustLevel(TRUST
   const userId = req.kauth.grant.access_token.content.sub;
   const { artworkId, paymentMethod } = req.body;
 
-  console.log('[ORDER POST DEBUG] Request:', { userId, artworkId, paymentMethod });
-
-  if (!artworkId || isNaN(parseInt(artworkId))) {
-    console.log('[ORDER POST ERROR] Invalid artwork ID:', artworkId);
-    return res.status(400).json({ error: 'Invalid artwork ID' });
-  }
-  if (!['paypal', 'orange_money', 'myzaka'].includes(paymentMethod)) {
-    console.log('[ORDER POST ERROR] Invalid payment method:', paymentMethod);
-    return res.status(400).json({ error: 'Invalid payment method' });
-  }
-
   const client = await pool.connect();
   try {
-    console.log('[ORDER POST DEBUG] Fetching user:', userId);
+    // Validate inputs...
+    if (!artworkId || isNaN(parseInt(artworkId))) {
+      return res.status(400).json({ error: 'Invalid artwork ID' });
+    }
+    if (!['paypal', 'orange_money', 'myzaka'].includes(paymentMethod)) {
+      return res.status(400).json({ error: 'Invalid payment method' });
+    }
+
+    // Fetch buyer DB user ID and name
     const { rows: userRows } = await client.query(
-      'SELECT user_id FROM users WHERE keycloak_id = $1',
+      'SELECT user_id, name, keycloak_id FROM users WHERE keycloak_id = $1', // Include keycloak_id
       [userId]
     );
     if (userRows.length === 0) {
-      console.log('[ORDER POST ERROR] User not found:', userId);
       return res.status(404).json({ error: 'User not found' });
     }
-    const dbUserId = userRows[0].user_id;
+    const dbUserId = userRows[0].user_id;  // This is the integer user_id
+    const buyerName = userRows[0].name || 'Buyer';
+    const buyerKeycloakId = userRows[0].keycloak_id; // Get the buyer's keycloak_id
 
-    console.log('[ORDER POST DEBUG] Fetching artwork:', artworkId);
+    // Fetch artwork + artist info
     const { rows: artworkRows } = await client.query(
-      'SELECT artwork_id, title, price FROM artworks WHERE artwork_id = $1 AND status = $2',
-      [artworkId, 'available']
+      `SELECT a.artwork_id, a.title, a.price, u.keycloak_id AS artist_keycloak_id  
+       FROM artworks a
+       JOIN users u ON a.artist_id = u.user_id
+       WHERE a.artwork_id = $1 AND a.status = 'available'`,
+      [artworkId]
     );
+
     if (artworkRows.length === 0) {
-      console.log('[ORDER POST ERROR] Artwork not found or unavailable:', artworkId);
       return res.status(404).json({ error: 'Artwork not found or unavailable' });
     }
+    const artwork = artworkRows[0];
+    const artistKeycloakId = artworkRows[0].artist_keycloak_id; // Get the artist's keycloak_id from the query
 
+    // Convert price
+    const price = Number(artwork.price);
+    if (isNaN(price) || price <= 0) {
+      return res.status(500).json({ error: 'Invalid price in database' });
+    }
+
+    // Create payment order (PayPal or mock)
     let paymentId, paymentUrl, paymentStatus = 'pending';
     if (paymentMethod === 'paypal') {
+      const exchangeRate = 0.073; // Hardcoded example; ideally dynamic
+      const priceInUSD = (price * exchangeRate).toFixed(2);
       const request = new paypal.orders.OrdersCreateRequest();
       request.prefer('return=representation');
       request.requestBody({
         intent: 'CAPTURE',
         purchase_units: [{
           amount: {
-            currency_code: 'BWP',
-            value: artworkRows[0].price.toFixed(2)
+            currency_code: 'USD',
+            value: priceInUSD
           },
-          description: `Purchase of ${artworkRows[0].title}`
+          description: `Purchase of ${artwork.title}`
         }],
         application_context: {
-          return_url: `${API_BASE_URL}/order-success`,
-          cancel_url: `${API_BASE_URL}/order-cancel`
+          return_url: `${process.env.APP_URL}/order-success`,
+          cancel_url: `${process.env.APP_URL}/order-cancel`
         }
       });
       const response = await paypalClient.execute(request);
       paymentId = response.result.id;
       paymentUrl = response.result.links.find(link => link.rel === 'approve').href;
-      console.log('[ORDER POST PAYPAL] Created order:', { paymentId, paymentUrl });
     } else {
-      // Mock Orange Money and MyZaka
       paymentId = `${paymentMethod}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
       paymentUrl = `/mock-payment/${paymentId}`;
-      console.log(`[ORDER POST MOCK ${paymentMethod.toUpperCase()}] Mocked payment:`, { paymentId, paymentUrl });
     }
 
-    console.log('[ORDER POST DEBUG] Creating order:', { dbUserId, artworkId });
+    // Insert order in DB
     const { rows: orderRows } = await client.query(
-      'INSERT INTO orders (buyer_id, artwork_id, total_amount, status, payment_status, payment_method, payment_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING order_id',
-      [dbUserId, artworkId, artworkRows[0].price, 'pending', paymentStatus, paymentMethod, paymentId]
+      `INSERT INTO orders (buyer_id, artwork_id, total_amount, status, payment_status, payment_method, payment_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING order_id`,
+      [dbUserId, artworkId, price, 'pending', paymentStatus, paymentMethod, paymentId]
     );
 
-    console.log('[ORDER POST SUCCESS] Order created:', orderRows[0]);
+    // Notify artist via messaging system:
+    // 1) Find or create thread between buyer and artist about artwork
+    let threadRes = await client.query(
+      `SELECT id FROM threads WHERE artwork_id = $1 AND user_id = $2 AND participant_id = $3`,
+      [artworkId, buyerKeycloakId, artistKeycloakId] // Use Keycloak IDs here
+    );
+    let threadId;
+    if (threadRes.rows.length === 0) {
+      const insertThread = await client.query(
+        `INSERT INTO threads (artwork_id, user_id, participant_id, status)
+         VALUES ($1, $2, $3, $4) RETURNING id`,
+        [artworkId, buyerKeycloakId, artistKeycloakId, 'active'] // Use artistKeycloakId
+      );
+      threadId = insertThread.rows[0].id;
+    } else {
+      threadId = threadRes.rows[0].id;
+    }
+
+    // 2) Insert message notifying artist
+    const messageContent = `🎨 Your artwork '${artwork.title}' has been ordered by **${buyerName}**.`;
+    await client.query(
+      `INSERT INTO messages (thread_id, sender_id, content, status)
+       VALUES ($1, $2, $3, $4)`,
+      [threadId, buyerKeycloakId, messageContent, 'active'] // Use buyerKeycloakId
+    );
+
+    // Return response
     res.status(200).json({ order_id: orderRows[0].order_id, redirect: paymentUrl });
   } catch (error) {
-    console.error('[ORDER POST ERROR]', {
-      message: error.message,
-      stack: error.stack,
-      userId,
-      artworkId
-    });
+    console.error('[ORDER POST ERROR]', error);
     res.status(500).json({ error: 'Failed to create order', details: error.message });
   } finally {
     client.release();
-    console.log('[ORDER POST DEBUG] Database client released');
   }
 });
 
-// Update GET /api/orders to include payment_method
 router.get('/orders', keycloak.protect(), requireTrustLevel(TRUST_LEVELS.VERIFIED), async (req, res) => {
   const userId = req.kauth.grant.access_token.content.sub;
   const { page = 1, limit = 10 } = req.query;
@@ -1870,6 +1914,185 @@ app.put('/api/orders/:id/status', keycloak.protect('realm:admin'), authPutLimite
   }
 });
 
+router.patch('/orders/:id/cancel', keycloak.protect(), requireTrustLevel(TRUST_LEVELS.VERIFIED), async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub; // Keycloak UUID
+  const orderId = req.params.id;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Fetch the logged-in user's DB user_id
+    const { rows: userRows } = await client.query(
+      'SELECT user_id FROM users WHERE keycloak_id = $1',
+      [userId]
+    );
+    if (userRows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const dbUserId = userRows[0].user_id; // Integer user_id
+
+    // Fetch order info + artwork + artist
+    const { rows: orderRows } = await client.query(
+      `SELECT o.order_id, o.buyer_id, o.status, a.artwork_id, a.title AS artwork_title
+       FROM orders o
+       JOIN artworks a ON o.artwork_id = a.artwork_id
+       WHERE o.order_id = $1`,
+      [orderId]
+    );
+    if (orderRows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    const order = orderRows[0];
+
+    // Check if the order belongs to the logged-in user
+    if (order.buyer_id !== dbUserId) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'You can only cancel your own orders' });
+    }
+    if (order.status === 'cancelled') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Order is already cancelled' });
+    }
+
+    // Update order status to cancelled
+    const { rows: updatedRows } = await client.query(
+      `UPDATE orders SET status = $1 WHERE order_id = $2 RETURNING *`,
+      ['cancelled', orderId]
+    );
+
+    // Find or create thread between buyer and artist
+    const { rows: artistRows } = await client.query(
+      `SELECT u.keycloak_id FROM users u
+       JOIN artworks a ON a.artist_id = u.user_id
+       WHERE a.artwork_id = $1`,
+      [order.artwork_id]
+    );
+    const artistKeycloakId = artistRows[0].keycloak_id;
+
+    let threadRes = await client.query(
+      `SELECT id FROM threads WHERE artwork_id = $1 AND user_id = $2 AND participant_id = $3`,
+      [order.artwork_id, userId, artistKeycloakId]
+    );
+    let threadId;
+    if (threadRes.rows.length === 0) {
+      const insertThread = await client.query(
+        `INSERT INTO threads (artwork_id, user_id, participant_id, status)
+         VALUES ($1, $2, $3, $4) RETURNING id`,
+        [order.artwork_id, userId, artistKeycloakId, 'active']
+      );
+      threadId = insertThread.rows[0].id;
+    } else {
+      threadId = threadRes.rows[0].id;
+    }
+
+    // Insert cancellation message
+    const buyerName = (await client.query('SELECT name FROM users WHERE keycloak_id = $1', [userId])).rows[0].name || 'Buyer';
+    const cancelMessage = `⚠️ The order for '${order.artwork_title}' by **${buyerName}** was cancelled.`;
+    await client.query(
+      `INSERT INTO messages (thread_id, sender_id, content, status)
+       VALUES ($1, $2, $3, $4)`,
+      [threadId, userId, cancelMessage, 'active']
+    );
+
+    await client.query('COMMIT');
+    res.status(200).json({ message: 'Order cancelled', order: updatedRows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('[ORDER CANCEL ERROR]', error);
+    res.status(500).json({ error: 'Failed to cancel order', details: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+// Notification count for unread messages
+router.get('/notifications/messages', keycloak.protect(), requireTrustLevel(TRUST_LEVELS.VERIFIED), async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub; // Keycloak UUID
+
+  const client = await pool.connect();
+  try {
+    // Get user's DB user_id
+    const { rows: userRows } = await client.query(
+      'SELECT user_id FROM users WHERE keycloak_id = $1',
+      [userId]
+    );
+    if (userRows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const dbUserId = userRows[0].user_id;
+
+    // Count unread messages in threads where user is participant
+    const { rows } = await client.query(
+      `SELECT COUNT(*) AS count
+       FROM messages m
+       JOIN threads t ON m.thread_id = t.id
+       WHERE (t.user_id = $1 OR t.participant_id = $1)
+       AND m.sender_id != $1
+       AND m.status = 'unread'`,
+      [userId]
+    );
+
+    res.status(200).json({ count: parseInt(rows[0].count) });
+  } catch (error) {
+    console.error('[NOTIFICATIONS MESSAGES ERROR]', error);
+    res.status(500).json({ error: 'Failed to fetch message notifications' });
+  } finally {
+    client.release();
+  }
+});
+
+// Notification count for orders
+router.get('/notifications/orders', keycloak.protect(), requireTrustLevel(TRUST_LEVELS.VERIFIED), async (req, res) => {
+  const userId = req.kauth.grant.access_token.content.sub; // Keycloak UUID
+
+  const client = await pool.connect();
+  try {
+    // Get user's DB user_id and role
+    const { rows: userRows } = await client.query(
+      'SELECT user_id, role FROM users WHERE keycloak_id = $1',
+      [userId]
+    );
+    if (userRows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const { user_id: dbUserId, role } = userRows[0];
+
+    let count = 0;
+    if (role === 'buyer') {
+      // Count pending or active orders for buyer
+      const { rows } = await client.query(
+        `SELECT COUNT(*) AS count
+         FROM orders
+         WHERE buyer_id = $1
+         AND status IN ('pending', 'active')`,
+        [dbUserId]
+      );
+      count = parseInt(rows[0].count);
+    } else if (role === 'artist') {
+      // Count pending orders for artist's artworks
+      const { rows } = await client.query(
+        `SELECT COUNT(*) AS count
+         FROM orders o
+         JOIN artworks a ON o.artwork_id = a.artwork_id
+         WHERE a.artist_id = $1
+         AND o.status = 'pending'`,
+        [dbUserId]
+      );
+      count = parseInt(rows[0].count);
+    }
+
+    res.status(200).json({ count });
+  } catch (error) {
+    console.error('[NOTIFICATIONS ORDERS ERROR]', error);
+    res.status(500).json({ error: 'Failed to fetch order notifications' });
+  } finally {
+    client.release();
+  }
+});
+
 // --- Order Items Routes ---
 
 app.post('/api/order-items', keycloak.protect(), authPostLimiter, async (req, res) => {
@@ -1885,12 +2108,29 @@ app.post('/api/order-items', keycloak.protect(), authPostLimiter, async (req, re
   }
 });
 
-app.get('/api/order-items/:order_id', keycloak.protect(), authGetLimiter, async (req, res) => {
+app.get('/api/orders/:orderId', keycloak.protect(), authPostLimiter, async (req, res) => {
+  const { orderId } = req.params;
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+
   try {
-    const { rows } = await pool.query('SELECT * FROM order_items WHERE order_id = $1', [req.params.order_id]);
-    res.json(rows);
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const client = await pool.connect();
+    try {
+      const result = await client.query(
+        'SELECT order_id, payment_status, total_amount, currency, artwork_id FROM orders WHERE order_id = $1 AND user_id = $2',
+        [orderId, decoded.user_id]
+      );
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'Order not found' });
+      }
+      res.json(result.rows[0]);
+    } finally {
+      client.release();
+    }
   } catch (error) {
-    res.status(500).json({ error: 'Database error', details: error.message });
+    console.error('[ORDER STATUS ERROR]', { message: error.message, stack: error.stack });
+    res.status(500).json({ error: 'Failed to fetch order status' });
   }
 });
 
@@ -1954,7 +2194,7 @@ app.post('/api/payments', keycloak.protect(), authPostLimiter, async (req, res) 
           }
         };
         console.log('[PAYMENTS POST PAYPAL BODY DEBUG] Order body:', JSON.stringify(orderBody, null, 2));
-        request.body = orderBody;
+        request.requestBody(orderBody); // Updated to use requestBody
         console.log('[PAYMENTS POST PAYPAL DEBUG] Sending PayPal request:', {
           clientId: process.env.PAYPAL_CLIENT_ID ? 'set' : 'unset',
           clientSecret: process.env.PAYPAL_CLIENT_SECRET ? 'set' : 'unset'
@@ -2022,7 +2262,7 @@ app.post('/api/payments', keycloak.protect(), authPostLimiter, async (req, res) 
         'INSERT INTO payments (order_id, amount, status, payment_method, payment_url, payment_ref) VALUES ($1, $2, $3, $4, $5, $6) RETURNING payment_id',
         [order_id, amount, 'pending', payment_method, paymentUrl, paymentRef]
       );
-      const paymentId = rows[0].payment_id; // ✅ Moved after query
+      const paymentId = rows[0].payment_id;
 
       // Update orders table for consistency
       await client.query(
@@ -2044,221 +2284,259 @@ app.post('/api/payments', keycloak.protect(), authPostLimiter, async (req, res) 
   }
 });
 
-app.get('/api/payments/:order_id', keycloak.protect(), authGetLimiter, async (req, res) => {
-  try {
-    console.log('[PAYMENTS GET DEBUG] Fetching payments for order:', req.params.order_id);
-    const { rows } = await pool.query('SELECT * FROM payments WHERE order_id = $1', [req.params.order_id]);
-    console.log('[PAYMENTS GET SUCCESS] Payments:', rows);
-    res.json(rows);
-  } catch (error) {
-    console.error('[PAYMENTS GET ERROR]', error.message);
-    res.status(500).json({ error: 'Database error', details: error.message });
-  }
-});
-
-app.put('/api/payments/:id/status', keycloak.protect('realm:admin'), authPutLimiter, async (req, res) => {
-  const { status } = req.body;
+app.get('/payment-cancel', async (req, res) => {
+  const { token } = req.query; // PayPal sends order ID as token
   const client = await pool.connect();
   try {
-    console.log('[PAYMENTS PUT DEBUG] Updating payment status:', { payment_id: req.params.id, status });
-    if (!['pending', 'completed', 'failed'].includes(status)) {
-      console.log('[PAYMENTS PUT ERROR] Invalid status:', status);
-      return res.status(400).json({ error: 'Invalid status' });
+    console.log('[PAYMENT CANCEL DEBUG] Handling cancel:', { token });
+    if (!token) {
+      console.log('[PAYMENT CANCEL ERROR] Missing token');
+      return res.status(400).send('Missing payment token');
     }
 
     await client.query('BEGIN');
-    const { rows } = await client.query(
-      'UPDATE payments SET status = $1 WHERE payment_id = $2 RETURNING order_id',
-      [status, req.params.id]
-    );
-    if (rows.length === 0) {
-      console.log('[PAYMENTS PUT ERROR] Payment not found:', req.params.id);
-      return res.status(404).json({ error: 'Payment not found' });
-    }
 
-    const orderId = rows[0].order_id;
+    // Find payment by PayPal order ID
+    const { rows: paymentRows } = await client.query(
+      'SELECT order_id, payment_id FROM payments WHERE payment_ref = $1 AND payment_method = $2 AND status = $3',
+      [token, 'paypal', 'pending']
+    );
+    if (paymentRows.length === 0) {
+      console.log('[PAYMENT CANCEL ERROR] Payment not found or not pending:', token);
+      await client.query('ROLLBACK');
+      return res.status(404).send('Payment not found or already processed');
+    }
+    const { order_id, payment_id } = paymentRows[0];
+
+    // Update payment and order status
+    await client.query(
+      'UPDATE payments SET status = $1 WHERE payment_id = $2 AND payment_ref = $3',
+      ['cancelled', payment_id, token]
+    );
     await client.query(
       'UPDATE orders SET payment_status = $1 WHERE order_id = $2',
-      [status, orderId]
+      ['cancelled', order_id]
     );
 
-    if (status === 'completed') {
-      const { rows: orderRows } = await client.query(
-        'SELECT artwork_id FROM orders WHERE order_id = $1',
-        [orderId]
-      );
-      const artworkId = orderRows[0].artwork_id;
-      const { rows: artworkRows } = await client.query(
-        'SELECT artist_id FROM artworks WHERE artwork_id = $1',
-        [artworkId]
-      );
-      const artistId = artworkRows[0].artist_id;
-      const { rows: userRows } = await client.query(
-        'SELECT email FROM users WHERE keycloak_id = $1',
-        [artistId]
-      );
-      const artistEmail = userRows[0].email;
-
-      const emailHtml = `
-        <h1>Artwork Sold!</h1>
-        <p>Congratulations, your artwork has been sold and payment has been completed. Please fulfill the order.</p>
-      `;
-      await sendEmail(artistEmail, 'Artwork Sale Completed', emailHtml);
-
-      const system_user_id = process.env.SYSTEM_USER_ID;
-      if (!system_user_id) throw new Error('SYSTEM_USER_ID not configured');
-      const messageContent = 'Your artwork has been sold and payment is complete. Please fulfill the order.';
-      await client.query(
-        'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3)',
-        [system_user_id, artistId, messageContent]
-      );
-    }
-
-    await client.query('COMMIT');
-    console.log('[PAYMENTS PUT SUCCESS] Status updated:', { payment_id: req.params.id, status });
-    res.json(rows[0]);
-  } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('[PAYMENTS PUT ERROR]', error.message);
-    res.status(500).json({ error: 'Database or notification error', details: error.message });
-  } finally {
-    client.release();
-  }
-});
-
-app.post('/api/payments/confirm', keycloak.protect(), orderLimiter, async (req, res) => {
-  const { order_id, transaction_ref } = req.body;
-  const client = await pool.connect();
-  try {
-    console.log('[PAYMENTS CONFIRM DEBUG] Confirming payment:', { order_id, transaction_ref });
-    if (!order_id || !transaction_ref) {
-      console.log('[PAYMENTS CONFIRM ERROR] Missing fields:', { order_id, transaction_ref });
-      return res.status(400).json({ error: 'Missing order_id or transaction_ref' });
-    }
-    if (!transaction_ref.startsWith('orange_money-') && !transaction_ref.startsWith('myzaka-')) {
-      console.log('[PAYMENTS CONFIRM ERROR] Invalid transaction reference:', transaction_ref);
-      return res.status(400).json({ error: 'Invalid transaction reference' });
-    }
-
-    await client.query('BEGIN');
-    const { rows } = await client.query(
-      'UPDATE payments SET status = $1, payment_ref = $2 WHERE order_id = $3 RETURNING order_id, payment_method',
-      ['completed', transaction_ref, order_id]
-    );
-    if (rows.length === 0) {
-      console.log('[PAYMENTS CONFIRM ERROR] Payment not found:', order_id);
-      return res.status(404).json({ error: 'Payment not found' });
-    }
-
-    const orderId = rows[0].order_id;
-    const paymentMethod = rows[0].payment_method;
-    await client.query(
-      'UPDATE orders SET payment_status = $1 WHERE order_id = $2',
-      ['completed', orderId]
-    );
-
+    // Fetch buyer email and artwork title
     const { rows: orderRows } = await client.query(
-      'SELECT artwork_id, buyer_id FROM orders WHERE order_id = $1',
-      [orderId]
+      'SELECT buyer_id, artwork_id FROM orders WHERE order_id = $1',
+      [order_id]
     );
-    const artworkId = orderRows[0].artwork_id;
-    const buyerId = orderRows[0].buyer_id;
-
+    const { buyer_id, artwork_id } = orderRows[0];
+    const { rows: userRows } = await client.query(
+      'SELECT email FROM users WHERE user_id = $1',
+      [buyer_id]
+    );
     const { rows: artworkRows } = await client.query(
-      'SELECT artist_id, title FROM artworks WHERE artwork_id = $1',
-      [artworkId]
+      'SELECT title FROM artworks WHERE artwork_id = $1',
+      [artwork_id]
     );
-    const artistId = artworkRows[0].artist_id;
+    const buyerEmail = userRows[0].email;
     const artworkTitle = artworkRows[0].title;
 
-    const { rows: artistRows } = await client.query(
-      'SELECT email FROM users WHERE keycloak_id = $1',
-      [artistId]
-    );
-    const artistEmail = artistRows[0].email;
-
-    const { rows: buyerRows } = await client.query(
-      'SELECT email FROM users WHERE keycloak_id = $1',
-      [buyerId]
-    );
-    const buyerEmail = buyerRows[0].email;
-
-    const artistEmailHtml = `<h1>Artwork Sold!</h1><p>Your artwork "${artworkTitle}" has been sold and payment is complete. Please fulfill the order.</p>`;
-    await sendEmail(artistEmail, 'Artwork Sale Completed', artistEmailHtml);
-
-    const system_user_id = process.env.SYSTEM_USER_ID;
-    if (!system_user_id) throw new Error('SYSTEM_USER_ID not configured');
-    const artistMessage = `Your artwork "${artworkTitle}" is sold and paid. Fulfill the order.`;
-    await client.query(
-      'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3)',
-      [system_user_id, artistId, artistMessage]
-    );
-
-    const buyerEmailHtml = `<h1>Payment Confirmed</h1><p>Your payment for "${artworkTitle}" is complete. Thank you for your purchase!</p>`;
-    await sendEmail(buyerEmail, 'Payment Confirmation', buyerEmailHtml);
+    // Send cancellation email
+    const emailHtml = `
+      <h1>Payment Cancelled</h1>
+      <p>Your payment for "${artworkTitle}" (Order ${order_id}) was cancelled.</p>
+      <p>You can try again from the <a href="${process.env.APP_URL}/orders">Orders page</a>.</p>
+    `;
+    await sendEmail(buyerEmail, 'Payment Cancelled', emailHtml);
 
     await client.query('COMMIT');
-    console.log('[PAYMENTS CONFIRM SUCCESS] Payment confirmed:', { order_id, transaction_ref });
-    res.status(200).json({ message: 'Payment confirmed' });
+    console.log('[PAYMENT CANCEL SUCCESS] Payment cancelled:', { order_id, payment_id, payment_ref: token });
+
+    // Redirect to frontend Orders page
+    const redirectUrl = `http://localhost:3001/orders`;
+    console.log('[PAYMENT CANCEL REDIRECT] Redirecting to:', redirectUrl);
+    res.redirect(redirectUrl);
   } catch (error) {
     await client.query('ROLLBACK');
-    console.error('[PAYMENTS CONFIRM ERROR]', error.message);
-    res.status(500).json({ error: 'Confirmation failed', details: error.message });
+    console.error('[PAYMENT CANCEL ERROR]', { message: error.message, stack: error.stack });
+    res.status(500).send('Error processing cancellation');
   } finally {
     client.release();
   }
 });
 
-// PayPal Webhook
-app.post('/webhook/paypal', express.raw({ type: 'application/json' }), async (req, res) => {
-  const webhookEvent = req.body;
-  try {
-    console.log('[PAYPAL WEBHOOK DEBUG] Event:', webhookEvent.event_type);
-    if (webhookEvent.event_type === 'CHECKOUT.ORDER.APPROVED') {
-      const paymentRef = webhookEvent.resource.id;
-      const client = await pool.connect();
-      try {
-        if (payment_method !== 'paypal') {
-        const { rows } = await client.query(
-          'UPDATE payments SET status = $1 WHERE payment_ref = $2 RETURNING order_id',
-          ['completed', paymentRef]
-        );
-      }
-      if (rows.length > 0) {
-        await client.query(
-          'UPDATE orders SET payment_status = $1 WHERE order_id = $2',
-          ['completed', rows[0].order_id]
-        );
-        console.log('[PAYPAL WEBHOOK SUCCESS] Payment completed:', { paymentRef, order_id: rows[0].order_id });
-      }
-    } finally {
-      client.release();
-    }
-    }
-    res.status(200).send('Webhook received');
-  } catch (error) {
-    console.error('[PAYPAL WEBHOOK ERROR]', error);
-    res.status(400).send('Webhook error');
-    response: error.response?.data;
-  }
-});
-
-// Mock Payment Page
-app.get('/mock-payment/:paymentRef', (req, res) => {
+// Mock Payment Page 
+app.get('/mock-payment/:paymentRef', async (req, res) => {
   const { paymentRef } = req.params;
   const paymentMethod = paymentRef.startsWith('orange_money-') ? 'Orange Money' : 'MyZaka';
   const ussdCode = paymentMethod === 'Orange Money' ? '*145#' : '*167#';
+  const orderId = paymentRef.split('-')[1];
+
+  // Fetch order details
+  let amount, artworkTitle;
+  try {
+    const { rows } = await pool.query(
+      'SELECT o.total_amount, a.title FROM orders o JOIN artworks a ON o.artwork_id = a.artwork_id WHERE o.order_id = $1',
+      [orderId]
+    );
+    if (rows.length === 0) {
+      console.error('[MOCK PAYMENT ERROR] Order not found:', orderId);
+      return res.status(404).send('Order not found');
+    }
+    amount = rows[0].total_amount;
+    artworkTitle = rows[0].title;
+  } catch (error) {
+    console.error('[MOCK PAYMENT ERROR] Fetching order:', error.message);
+    return res.status(500).send('Server error');
+  }
+
+  // Serve mock payment page with simplified JS
   res.send(`
-    <h1>${paymentMethod} Payment</h1>
-    <p>Order Reference: ${paymentRef}</p>
-    <p>Please complete payment via USSD: ${ussdCode}</p>
-    <p>After payment, confirm with transaction reference: ${paymentRef}</p>
-    <form action="/api/payments/confirm" method="POST">
-      <input type="hidden" name="order_id" value="${paymentRef.split('-')[1]}">
-      <input type="text" name="transaction_ref" value="${paymentRef}" readonly>
-      <button type="submit">Confirm Payment</button>
-    </form>
-    <a href="/orders">Back to Orders</a>
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>${paymentMethod} Payment</title>
+      <style>
+        body {
+          font-family: Arial, sans-serif;
+          background: linear-gradient(135deg, #f4f1de, #ffffff);
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          min-height: 100vh;
+          margin: 0;
+          color: #2b2d42;
+        }
+        .container {
+          background: #f4f1de;
+          padding: 2rem;
+          border-radius: 8px;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+          max-width: 500px;
+          width: 100%;
+          text-align: center;
+        }
+        h1 {
+          color: #ff6200;
+          font-size: 2rem;
+          margin-bottom: 1rem;
+        }
+        p {
+          font-size: 1.1rem;
+          margin: 0.5rem 0;
+        }
+        input, button {
+          padding: 0.5rem;
+          margin: 0.5rem 0;
+          border-radius: 4px;
+          border: 1px solid #ccc;
+          width: calc(100% - 1rem);
+          font-size: 1rem;
+        }
+        button {
+          background-color: #ff6200;
+          color: #f4f1de;
+          border: none;
+          cursor: pointer;
+          font-weight: 600;
+          transition: background-color 0.3s;
+        }
+        button:hover {
+          background-color: #e05500;
+        }
+        .step {
+          display: none;
+        }
+        .step.active {
+          display: block;
+        }
+        a {
+          color: #4a7289;
+          text-decoration: none;
+          font-weight: 600;
+          margin-top: 1rem;
+          display: inline-block;
+        }
+        a:hover {
+          color: #ff6200;
+        }
+        .error {
+          color: #d90429;
+          font-size: 1rem;
+          margin: 0.5rem 0;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div id="step1" class="step active">
+          <h1>${paymentMethod} Payment</h1>
+          <p>Artwork: ${artworkTitle}</p>
+          <p>Amount: BWP ${parseFloat(amount).toFixed(2)}</p>
+          <p>Order Reference: ${paymentRef}</p>
+          <p>Dial ${ussdCode} to initiate payment, then proceed.</p>
+          <button onclick="showStep(2)">Proceed to PIN</button>
+        </div>
+        <div id="step2" class="step">
+          <h1>Enter PIN</h1>
+          <p>Enter your ${paymentMethod} PIN (mock, any 4 digits):</p>
+          <input type="password" id="pin" maxlength="4" placeholder="1234">
+          <button onclick="showStep(3)">Submit PIN</button>
+        </div>
+        <div id="step3" class="step">
+          <h1>Confirm Payment</h1>
+          <p>Confirm your payment for order ${orderId}.</p>
+          <p>Transaction Reference: ${paymentRef}</p>
+          <button onclick="confirmPayment()">Confirm Payment</button>
+        </div>
+        <div id="error" class="error"></div>
+        <a href="/orders">Back to Orders</a>
+      </div>
+      <script>
+        function showStep(step) {
+          try {
+            document.querySelectorAll('.step').forEach(s => s.classList.remove('active'));
+            document.getElementById('step' + step).classList.add('active');
+            document.getElementById('error').textContent = '';
+          } catch (err) {
+            document.getElementById('error').textContent = 'Error navigating steps: ' + err.message;
+          }
+        }
+
+        async function confirmPayment() {
+          const pin = document.getElementById('pin').value;
+          const errorDiv = document.getElementById('error');
+          errorDiv.textContent = '';
+
+          if (!pin || pin.length !== 4) {
+            errorDiv.textContent = 'Please enter a 4-digit PIN';
+            return;
+          }
+
+          try {
+            const response = await fetch('/api/payments/confirm', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                // Token should be set by your auth system; adjust if needed
+                'Authorization': 'Bearer ' + (localStorage.getItem('token') || '')
+              },
+              body: JSON.stringify({
+                order_id: '${orderId}',
+                transaction_ref: '${paymentRef}'
+              })
+            });
+
+            const data = await response.json();
+            if (response.ok) {
+              alert('Payment confirmed! Redirecting to orders...');
+              window.location.href = '/orders';
+            } else {
+              errorDiv.textContent = data.error || 'Failed to confirm payment';
+            }
+          } catch (err) {
+            errorDiv.textContent = 'Error confirming payment: ' + err.message;
+          }
+        }
+      </script>
+    </body>
+    </html>
   `);
 });
 
@@ -2568,66 +2846,177 @@ router.delete('/threads/:threadId', keycloak.protect(), messageLimiter, async (r
 app.use('/api', router);
 
 // --- PayPal Callback ---
-
-app.post('/payment-callback', express.json(), publicDataLimiter, authPostLimiter, messageLimiter, async (req, res) => {
-  const { payment_status, txn_id, custom } = req.body;
+app.get('/payment-callback', async (req, res) => {
+  const { token, PayerID } = req.query; // token is PayPal order ID
   const client = await pool.connect();
   try {
-    const allowedIps = ['66.211.170.66', '173.0.81.1']; // Example PayPal IPs
-    if (!allowedIps.includes(req.ip)) {
-      console.warn('Unauthorized callback attempt from IP:', req.ip);
-      return res.status(403).json({ error: 'Unauthorized' });
+    console.log('[PAYMENT CALLBACK DEBUG] Handling success:', { token, PayerID });
+    if (!token || !PayerID) {
+      console.log('[PAYMENT CALLBACK ERROR] Missing parameters');
+      return res.status(400).send('Missing payment parameters');
     }
 
-    if (payment_status === 'Completed') {
-      const orderId = custom;
-      await client.query('BEGIN');
-      const { rows } = await client.query(
-        'UPDATE payments SET status = $1, payment_ref = $2 WHERE order_id = $3 RETURNING order_id',
-        ['completed', txn_id, orderId]
-      );
-      if (rows.length === 0) {
-        console.error('Payment not found for order_id:', orderId);
-        return res.status(404).json({ error: 'Payment not found' });
-      }
+    await client.query('BEGIN');
 
-      const { rows: orderRows } = await client.query(
-        'SELECT artwork_id FROM orders WHERE order_id = $1',
-        [orderId]
-      );
-      const artworkId = orderRows[0].artwork_id;
-      const { rows: artworkRows } = await client.query(
-        'SELECT artist_id, title FROM artworks WHERE artwork_id = $1',
-        [artworkId]
-      );
-      const artistId = artworkRows[0].artist_id;
-      const artworkTitle = artworkRows[0].title;
+    // Find payment
+    const { rows: paymentRows } = await client.query(
+      'SELECT order_id, payment_id, amount FROM payments WHERE payment_ref = $1 AND payment_method = $2 AND status = $3',
+      [token, 'paypal', 'pending']
+    );
+    if (paymentRows.length === 0) {
+      console.log('[PAYMENT CALLBACK ERROR] Payment not found or not pending:', token);
+      await client.query('ROLLBACK');
+      return res.status(404).send('Payment not found or already processed');
+    }
+    const { order_id, payment_id, amount } = paymentRows[0];
 
-      const { rows: userRows } = await client.query(
-        'SELECT email FROM users WHERE keycloak_id = $1',
-        [artistId]
-      );
-      const artistEmail = userRows[0].email;
+    // Capture PayPal order
+    const request = new paypal.orders.OrdersCaptureRequest(token);
+    request.requestBody({});
+    const response = await paypalClient.execute(request);
+    if (response.result.status !== 'COMPLETED') {
+      console.log('[PAYMENT CALLBACK ERROR] Capture failed:', response.result);
+      await client.query('ROLLBACK');
+      return res.status(500).send('Payment capture failed');
+    }
 
-      const emailHtml = `<h1>Artwork Sold!</h1><p>Your artwork "${artworkTitle}" has been sold and payment is complete. Please fulfill the order.</p>`;
-      await sendEmail(artistEmail, 'Artwork Sale Completed', emailHtml);
+    // Get artwork details
+    const { rows: orderRows } = await client.query(
+      'SELECT artwork_id, buyer_id FROM orders WHERE order_id = $1',
+      [order_id]
+    );
+    const { artwork_id, buyer_id } = orderRows[0];
+    const { rows: artworkRows } = await client.query(
+      'SELECT artist_id, title, status FROM artworks WHERE artwork_id = $1',
+      [artwork_id]
+    );
+    if (artworkRows.length === 0) {
+      console.log('[PAYMENT CALLBACK ERROR] Artwork not found:', artwork_id);
+      await client.query('ROLLBACK');
+      return res.status(404).send('Artwork not found');
+    }
+    const { artist_id, title: artworkTitle, status: artworkStatus } = artworkRows[0];
 
-      const system_user_id = process.env.SYSTEM_USER_ID;
-      if (!system_user_id) throw new Error('SYSTEM_USER_ID not configured');
-      const messageContent = `Your artwork "${artworkTitle}" is sold and paid. Fulfill the order.`;
+    if (artworkStatus === 'sold') {
+      console.log('[PAYMENT CALLBACK WARN] Artwork already sold, refunding:', artwork_id);
+      // Refund the payment
+      const refundRequest = new paypal.payments.CapturesRefundRequest(response.result.purchase_units[0].payments.captures[0].id);
+      refundRequest.requestBody({ amount: { currency_code: 'USD', value: amount } });
+      await paypalClient.execute(refundRequest);
+
+      // Update payment and order to cancelled
       await client.query(
-        'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3)',
-        [system_user_id, artistId, messageContent]
+        'UPDATE payments SET status = $1 WHERE payment_id = $2 AND payment_ref = $3',
+        ['cancelled', payment_id, token]
       );
-      await client.query('COMMIT');
+      await client.query(
+        'UPDATE orders SET payment_status = $1 WHERE order_id = $2',
+        ['cancelled', order_id]
+      );
 
-      console.log('Payment completed and artist notified for order:', orderId);
+      // Notify buyer
+      const { rows: buyerRows } = await client.query(
+        'SELECT email FROM users WHERE user_id = $1',
+        [buyer_id]
+      );
+      const buyerEmail = buyerRows[0].email;
+      const buyerEmailHtml = `
+        <h1>Payment Cancelled</h1>
+        <p>Your payment for "${artworkTitle}" (Order ${order_id}) was cancelled because the artwork is already sold.</p>
+        <p>A refund has been issued. Check your PayPal account or contact support.</p>
+      `;
+      await sendEmail(buyerEmail, 'Payment Cancelled - Artwork Sold', buyerEmailHtml);
+
+      await client.query('COMMIT');
+      console.log('[PAYMENT CALLBACK SUCCESS] Refunded for sold artwork:', { order_id, payment_id, payment_ref: token });
+      return res.redirect('http://localhost:3001/orders?error=artwork_sold');
     }
-    res.status(200).json({ status: 'Processed' });
+
+    // Update payment and order status
+    await client.query(
+      'UPDATE payments SET status = $1 WHERE payment_id = $2 AND payment_ref = $3',
+      ['completed', payment_id, token]
+    );
+    await client.query(
+      'UPDATE orders SET payment_status = $1 WHERE order_id = $2',
+      ['completed', order_id]
+    );
+
+    // Mark artwork as sold
+    await client.query(
+      'UPDATE artworks SET status = $1 WHERE artwork_id = $2',
+      ['sold', artwork_id]
+    );
+
+    // Fetch user emails
+    const { rows: artistRows } = await client.query(
+      'SELECT email, keycloak_id FROM users WHERE user_id = $1',
+      [artist_id]
+    );
+    const { rows: buyerRows } = await client.query(
+      'SELECT email, keycloak_id, name FROM users WHERE user_id = $1',
+      [buyer_id]
+    );
+    const artistEmail = artistRows[0].email;
+    const artistKeycloakId = artistRows[0].keycloak_id;
+    const buyerEmail = buyerRows[0].email;
+    const buyerKeycloakId = buyerRows[0].keycloak_id;
+
+    // Send emails
+    const artistEmailHtml = `
+      <h1>Artwork Sold!</h1>
+      <p>Your artwork "${artworkTitle}" has been sold and payment is complete. Please fulfill the order.</p>
+    `;
+    await sendEmail(artistEmail, 'Artwork Sale Completed', artistEmailHtml);
+
+    const buyerEmailHtml = `
+      <h1>Payment Confirmed</h1>
+      <p>Your payment for "${artworkTitle}" (Order ${order_id}) is complete. Thank you for your purchase!</p>
+    `;
+    await sendEmail(buyerEmail, 'Payment Confirmation', buyerEmailHtml);
+
+    // Find or create thread for messaging
+    let { rows: threadRows } = await client.query(
+      `SELECT id FROM threads WHERE artwork_id = $1 AND user_id = $2 AND participant_id = $3`,
+      [artwork_id, buyerKeycloakId, artistKeycloakId]
+    );
+    let threadId;
+    if (threadRows.length === 0) {
+      const { rows: insertThread } = await client.query(
+        `INSERT INTO threads (artwork_id, user_id, participant_id, status)
+         VALUES ($1, $2, $3, $4) RETURNING id`,
+        [artwork_id, buyerKeycloakId, artistKeycloakId, 'active']
+      );
+      threadId = insertThread[0].id;
+    } else {
+      threadId = threadRows[0].id;
+    }
+
+    // Send messages
+    const system_user_id = process.env.SYSTEM_USER_ID;
+    if (!system_user_id) throw new Error('SYSTEM_USER_ID not configured');
+    const artistMessage = `Your artwork "${artworkTitle}" is sold and paid. Fulfill the order.`;
+    await client.query(
+      `INSERT INTO messages (thread_id, sender_id, content, status)
+       VALUES ($1, $2, $3, $4)`,
+      [threadId, system_user_id, artistMessage, 'active']
+    );
+    const buyerMessage = `Your payment for "${artworkTitle}" is confirmed. Thank you for your purchase!`;
+    await client.query(
+      `INSERT INTO messages (thread_id, sender_id, content, status)
+       VALUES ($1, $2, $3, $4)`,
+      [threadId, system_user_id, buyerMessage, 'active']
+    );
+
+    await client.query('COMMIT');
+    console.log('[PAYMENT CALLBACK SUCCESS] Payment completed:', { order_id, payment_id, payment_ref: token });
+
+    // Redirect to Orders page
+    res.redirect('http://localhost:3001/orders?success=true');
   } catch (error) {
     await client.query('ROLLBACK');
-    console.error('PayPal callback error:', error.message);
-    res.status(500).json({ error: 'Callback processing failed', details: error.message });
+    console.error('[PAYMENT CALLBACK ERROR]', { message: error.message, stack: error.stack });
+    res.status(500).send('Error finalizing payment');
   } finally {
     client.release();
   }
@@ -2765,6 +3154,20 @@ app.use((err, req, res, next) => {
   console.error('Unhandled error:', err.message, err.stack);
   res.status(500).json({ error: 'Something broke on the server', details: err.message });
 });
+
+
+ app.get('*', (req, res) => { 
+  console.log('[SPA ROUTE DEBUG] Serving React app for:', req.originalUrl);
+  const indexPath = path.join(buildPath, 'index.html');
+  // Check if file exists to avoid ENOENT
+  require('fs').access(indexPath, (err) => {
+    if (err) {
+      console.error('[SPA ROUTE ERROR] index.html not found:', indexPath, err.message);
+      return res.status(500).send('Server error: React app not built. Please run `npm run build` in the frontend folder.');
+    }
+    res.sendFile(indexPath);
+  });
+ }); 
 
 // Start the server
 app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
