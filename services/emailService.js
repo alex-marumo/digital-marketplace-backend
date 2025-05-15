@@ -42,3 +42,5 @@ const sendVerificationEmail = async (user, code) => {
   `;
   return sendEmail(user.email, 'Email Verification Code', html);
 };
+
+module.exports = { sendEmail, sendVerificationEmail };

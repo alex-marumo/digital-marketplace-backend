@@ -411,11 +411,14 @@ app.post('/api/select-role', keycloak.protect(), authPostLimiter, async (req, re
 });
 
 app.post('/api/upload-artist-docs', keycloak.protect(), artistUpload, authPostLimiter, async (req, res) => {
+  console.log('Incoming fields:', req.body);
+  console.log('Incoming files:', req.files);
+
   const userId = req.kauth.grant.access_token.content.sub;
   const { files } = req;
 
   if (!files?.idDocument || !files?.proofOfWork) {
-    return res.status(400).json({ error: 'ID document and portfolio are required' });
+    return res.status(400).json({ error: 'Missing required files: idDocument or proofOfWork' });
   }
 
   try {
