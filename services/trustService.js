@@ -2,7 +2,7 @@ const { pool } = require('../db');
 
 const TRUST_LEVELS = {
   NEW: 1,      // Just registered
-  VERIFIED: 2, // Email verified
+  VERIFIED: 2, // Email verified or artist approved
   ESTABLISHED: 3, // First purchase
   TRUSTED: 4   // Multiple transactions
 };
@@ -38,11 +38,15 @@ const getTrustLevel = async (userId) => {
   }
   try {
     const { rows } = await pool.query(
-      'SELECT trust_level FROM users WHERE keycloak_id = $1',
+      'SELECT trust_level, is_verified FROM users WHERE keycloak_id = $1',
       [userId]
     );
-    const level = rows[0]?.trust_level || TRUST_LEVELS.NEW;
-    console.log(`[getTrustLevel] Fetched level for ${userId}: ${level}`);
+    if (!rows[0]) {
+      console.warn(`No user found for keycloak_id: ${userId}`);
+      return TRUST_LEVELS.NEW;
+    }
+    const level = rows[0].trust_level || (rows[0].is_verified ? TRUST_LEVELS.VERIFIED : TRUST_LEVELS.NEW);
+    console.log(`[getTrustLevel] Fetched level for ${userId}: ${level}, is_verified: ${rows[0].is_verified}`);
     return level;
   } catch (error) {
     console.error('Fetch trust level error:', error.message, 'User:', userId);
@@ -64,8 +68,10 @@ const updateUserTrustAfterOrder = async (userId) => {
     console.log('Order count for user:', userId, 'is:', orderCount);
     if (orderCount >= 5) {
       await updateTrustLevel(userId, TRUST_LEVELS.TRUSTED);
-    } else if (orderCount === 1) {
+    } else if (orderCount >= 1) {
       await updateTrustLevel(userId, TRUST_LEVELS.ESTABLISHED);
+    } else {
+      await updateTrustLevel(userId, TRUST_LEVELS.VERIFIED); // Ensure at least VERIFIED after any order attempt
     }
   } catch (error) {
     console.error('Update trust after order error:', error.message, 'User:', userId);
