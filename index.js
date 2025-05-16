@@ -2863,7 +2863,7 @@ app.get('/payment-callback', async (req, res) => {
     console.log('[PAYMENT CALLBACK DEBUG] Initiating callback:', { token, PayerID, timestamp: new Date().toISOString() });
     if (!token || !PayerID) {
       console.log('[PAYMENT CALLBACK ERROR] Missing token or PayerID:', { token, PayerID });
-      await client.query('ROLLBACK');
+      // No ROLLBACK here as transaction hasn't started yet
       return res.status(400).send('Missing payment parameters');
     }
 
@@ -2895,7 +2895,7 @@ app.get('/payment-callback', async (req, res) => {
       return res.status(500).send('Payment capture failed');
     }
 
-    // Get order details
+    // Get order details (includes integer buyer_id and integer artwork_id)
     const { rows: orderRows } = await client.query(
       'SELECT artwork_id, buyer_id FROM orders WHERE order_id = $1',
       [order_id]
@@ -2906,10 +2906,10 @@ app.get('/payment-callback', async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(404).send('Order not found');
     }
-    const { artwork_id, buyer_id } = orderRows[0];
+    const { artwork_id, buyer_id } = orderRows[0]; // buyer_id is an INTEGER
     console.log('[PAYMENT CALLBACK DEBUG] Order details:', { order_id, artwork_id, buyer_id });
 
-    // Verify artwork exists
+    // Verify artwork exists (includes integer artist_id)
     const { rows: artworkRows } = await client.query(
       'SELECT artist_id, title, status FROM artworks WHERE artwork_id = $1',
       [artwork_id]
@@ -2920,81 +2920,114 @@ app.get('/payment-callback', async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(404).send('Artwork not found');
     }
-    const { artist_id, title: artworkTitle, status: artworkStatus } = artworkRows[0];
-    console.log('[PAYMENT CALLBACK DEBUG] Artwork details:', { artwork_id, title: artworkTitle, status: artworkStatus });
-
-    // Check if artwork is already sold
+    const { artist_id, title: artworkTitle, status: artworkStatus } = artworkRows[0]; // artist_id is an INTEGER
+    console.log('[PAYMENT CALLBACK DEBUG] Artwork details:', { artwork_id, artist_id, title: artworkTitle, status: artworkStatus });
+    
+    // Check if artwork is already sold (REFUND LOGIC)
     if (artworkStatus === 'sold') {
       console.log('[PAYMENT CALLBACK WARN] Artwork already sold, refunding:', { artwork_id, artworkTitle });
       const captureId = response.result.purchase_units[0].payments.captures[0].id;
       const refundRequest = new paypal.payments.CapturesRefundRequest(captureId);
-      refundRequest.requestBody({ amount: { currency_code: 'USD', value: amount.toFixed(2) } });
+      // IMPORTANT: Ensure 'amount' for refund is the correct value and currency PayPal expects.
+      // If 'amount' from your payments table is in BWP and PayPal captured in USD, you need the USD captured amount.
+      // For simplicity, assuming 'amount' is what PayPal expects or you want a full refund based on PayPal's record.
+      // If your 'amount' variable from payments table is not the USD amount PayPal captured, this might need adjustment.
+      // A more robust way would be to get the captured amount from `response.result.purchase_units[0].payments.captures[0].amount`.
+      const capturedAmountValue = response.result.purchase_units[0].payments.captures[0].amount.value;
+      const capturedAmountCurrency = response.result.purchase_units[0].payments.captures[0].amount.currency_code;
+
+      refundRequest.requestBody({
+        amount: {
+          currency_code: capturedAmountCurrency,
+          value: capturedAmountValue
+        }
+      });
       await paypalClient.execute(refundRequest);
-      console.log('[PAYMENT CALLBACK DEBUG] Refund executed:', { captureId });
+      console.log('[PAYMENT CALLBACK DEBUG] Refund executed via PayPal:', { captureId, amount: capturedAmountValue, currency: capturedAmountCurrency });
 
       await client.query(
         'UPDATE payments SET status = $1 WHERE payment_id = $2 AND payment_ref = $3',
         ['cancelled', payment_id, token]
       );
       await client.query(
-        'UPDATE orders SET payment_status = $1 WHERE order_id = $2',
-        ['cancelled', order_id]
+        'UPDATE orders SET payment_status = $1, status = $2 WHERE order_id = $3',
+        ['cancelled', 'cancelled', order_id]
       );
-      console.log('[PAYMENT CALLBACK DEBUG] Payment and order cancelled:', { payment_id, order_id });
+      console.log('[PAYMENT CALLBACK DEBUG] Payment and order status updated to cancelled in DB:', { payment_id, order_id });
 
-      const { rows: buyerRows } = await client.query(
+      const { rows: buyerRefundEmailRows } = await client.query(
         'SELECT email FROM users WHERE user_id = $1',
         [buyer_id]
       );
-      const buyerEmail = buyerRows[0].email;
-      const buyerEmailHtml = `
-        <h1>Payment Cancelled</h1>
-        <p>Your payment for "${artworkTitle}" (Order ${order_id}) was cancelled because the artwork is already sold.</p>
-        <p>A refund has been issued. Check your PayPal account or contact support.</p>
-      `;
-      await sendEmail(buyerEmail, 'Payment Cancelled - Artwork Sold', buyerEmailHtml);
-      console.log('[PAYMENT CALLBACK DEBUG] Refund email sent:', { buyerEmail });
+      if (buyerRefundEmailRows.length > 0) {
+        const buyerEmailForRefund = buyerRefundEmailRows[0].email;
+        const buyerEmailHtml = `
+          <h1>Payment Cancelled</h1>
+          <p>Your payment for "${artworkTitle}" (Order ${order_id}) was cancelled because the artwork was already sold when your payment was processed.</p>
+          <p>A full refund for the amount of ${capturedAmountValue} ${capturedAmountCurrency} has been issued. Please check your PayPal account or contact support if you have questions.</p>
+        `;
+        await sendEmail(buyerEmailForRefund, 'Payment Cancelled & Refunded - Artwork Sold', buyerEmailHtml);
+        console.log('[PAYMENT CALLBACK DEBUG] Refund email sent to buyer:', { buyerEmail: buyerEmailForRefund });
+      } else {
+        console.error('[PAYMENT CALLBACK ERROR] Buyer not found for refund email:', { buyer_id });
+      }
 
       await client.query('COMMIT');
-      console.log('[PAYMENT CALLBACK SUCCESS] Refund completed:', { order_id, payment_id, payment_ref: token });
-      return res.redirect('http://localhost:3001/orders?error=artwork_sold');
+      console.log('[PAYMENT CALLBACK SUCCESS] Refund transaction committed:', { order_id, payment_id, payment_ref: token });
+      return res.redirect(`${process.env.APP_URL}/orders?status=refunded&reason=artwork_sold`);
     }
 
+    // --- Main Success Path (Artwork is Available) ---
     // Update payment
-    const paymentUpdate = await client.query(
+    const {rows: paymentUpdateRows} = await client.query(
       'UPDATE payments SET status = $1 WHERE payment_id = $2 AND payment_ref = $3 RETURNING payment_id, status',
       ['completed', payment_id, token]
     );
-    console.log('[PAYMENT CALLBACK DEBUG] Payment update result:', { paymentUpdate: paymentUpdate.rows });
+    console.log('[PAYMENT CALLBACK DEBUG] Payment update result:', { paymentUpdate: paymentUpdateRows });
 
     // Update order
-    const orderUpdate = await client.query(
-      'UPDATE orders SET payment_status = $1 WHERE order_id = $2 RETURNING order_id, payment_status',
-      ['completed', order_id]
+    const {rows: orderUpdateRows} = await client.query(
+      'UPDATE orders SET payment_status = $1, status = $2 WHERE order_id = $3 RETURNING order_id, payment_status, status',
+      ['completed', 'completed', order_id]
     );
-    console.log('[PAYMENT CALLBACK DEBUG] Order update result:', { orderUpdate: orderUpdate.rows });
+    console.log('[PAYMENT CALLBACK DEBUG] Order update result:', { orderUpdate: orderUpdateRows });
 
     // Update artwork
-    const artworkUpdate = await client.query(
+    const {rows: artworkUpdateRows} = await client.query(
       'UPDATE artworks SET status = $1 WHERE artwork_id = $2 RETURNING artwork_id, status',
       ['sold', artwork_id]
     );
-    console.log('[PAYMENT CALLBACK DEBUG] Artwork update result:', { artworkUpdate: artworkUpdate.rows });
-    if (artworkUpdate.rows.length === 0) {
-      console.log('[PAYMENT CALLBACK ERROR] Artwork update failed, no rows affected:', { artwork_id });
-      await client.query('ROLLBACK');
-      return res.status(500).send('Failed to update artwork status');
+    console.log('[PAYMENT CALLBACK DEBUG] Artwork update result:', { artworkUpdate: artworkUpdateRows });
+    if (artworkUpdateRows.length === 0) {
+      console.error('[PAYMENT CALLBACK ERROR] Artwork update failed, no rows affected:', { artwork_id });
+      // No ROLLBACK here, let the main catch handle it to ensure atomicity
+      throw new Error(`Failed to update artwork status for artwork_id ${artwork_id}`);
     }
 
-    // Get emails
-    const { rows: userRows } = await client.query(
-      'SELECT u1.email AS artist_email, u2.email AS buyer_email ' +
-      'FROM users u1, users u2 ' +
-      'WHERE u1.user_id = $1 AND u2.user_id = $2',
-      [artist_id, buyer_id]
+    // --- Fetch Keycloak IDs and Emails for Notifications/Messaging ---
+    const { rows: artistDetailsRows } = await client.query(
+      'SELECT email, keycloak_id FROM users WHERE user_id = $1',
+      [artist_id] // artist_id is the INTEGER DB ID from artworks table
     );
-    console.log('[PAYMENT CALLBACK DEBUG] User emails query result:', { userRows });
-    const { artist_email: artistEmail, buyer_email: buyerEmail } = userRows[0];
+    if (artistDetailsRows.length === 0) {
+        console.error('[PAYMENT CALLBACK ERROR] Artist user not found for DB ID:', artist_id);
+        throw new Error(`Artist user (for messaging/email) not found for DB ID ${artist_id}`);
+    }
+    const artistEmail = artistDetailsRows[0].email;
+    const artistKeycloakId = artistDetailsRows[0].keycloak_id; // Artist's UUID
+
+    const { rows: buyerDetailsRows } = await client.query(
+      'SELECT email, keycloak_id FROM users WHERE user_id = $1',
+      [buyer_id]  // buyer_id is the INTEGER DB ID from orders table
+    );
+    if (buyerDetailsRows.length === 0) {
+        console.error('[PAYMENT CALLBACK ERROR] Buyer user not found for DB ID:', buyer_id);
+        throw new Error(`Buyer user (for messaging/email) not found for DB ID ${buyer_id}`);
+    }
+    const buyerEmail = buyerDetailsRows[0].email;
+    const buyerKeycloakId = buyerDetailsRows[0].keycloak_id; // Buyer's UUID
+
+    console.log('[PAYMENT CALLBACK DEBUG] User details for notifications/messaging:', { artistEmail, artistKeycloakId, buyerEmail, buyerKeycloakId, artwork_id });
 
     // Send emails
     const artistEmailHtml = `
@@ -3007,51 +3040,115 @@ app.get('/payment-callback', async (req, res) => {
       <p>Your payment for "${artworkTitle}" (Order ${order_id}) was successful!</p>
       <p>Check your orders for details or contact the artist.</p>
     `;
-    await Promise.all([
-      sendEmail(artistEmail, 'Artwork Sold', artistEmailHtml),
-      sendEmail(buyerEmail, 'Payment Successful', buyerEmailHtml)
-    ]);
-    console.log('[PAYMENT CALLBACK DEBUG] Emails sent:', { artistEmail, buyerEmail });
-
-    // Create thread
-    const { rows: threadRows } = await client.query(
-      'INSERT INTO threads (user_id, participant_id, artwork_id, status) ' +
-      'VALUES ($1, $2, $3, $4) RETURNING id',
-      [buyer_id, artist_id, artwork_id, 'active']
+    // Not using Promise.all here to make debugging easier if one fails
+    try {
+        await sendEmail(artistEmail, 'Artwork Sold', artistEmailHtml);
+        console.log('[PAYMENT CALLBACK DEBUG] Artist email sent:', { artistEmail });
+        await sendEmail(buyerEmail, 'Payment Successful', buyerEmailHtml);
+        console.log('[PAYMENT CALLBACK DEBUG] Buyer email sent:', { buyerEmail });
+    } catch (emailError) {
+        console.error('[PAYMENT CALLBACK WARNING] Email sending failed, but continuing transaction:', emailError.message);
+        // Decide if email failure should roll back the transaction or just log. For now, logging and continuing.
+    }
+    
+    // --- Find or Create Thread for Messaging ---
+    let threadId;
+    console.log('[PAYMENT CALLBACK DEBUG] Looking for existing thread with (buyer, artist, artwork):', buyerKeycloakId, artistKeycloakId, artwork_id);
+    const { rows: existingThreadRows } = await client.query(
+      `SELECT id, status FROM threads 
+       WHERE user_id = $1 AND participant_id = $2 AND artwork_id = $3`, // Check for any existing thread
+      [buyerKeycloakId, artistKeycloakId, artwork_id]
     );
-    const threadId = threadRows[0].id;
-    console.log('[PAYMENT CALLBACK DEBUG] Thread created:', { threadId });
 
-    // Send messages
-    await client.query(
-      'INSERT INTO messages (thread_id, sender_id, content, status) ' +
-      'VALUES ($1, $2, $3, $4), ($1, $2, $5, $4)',
-      [
-        threadId,
-        SYSTEM_USER_ID,
-        `Order ${order_id} has been created for "${artworkTitle}". Buyer can now communicate with the artist.`,
-        'active',
-        `Payment for "${artworkTitle}" has been completed successfully.`
-      ]
-    );
-    console.log('[PAYMENT CALLBACK DEBUG] Messages sent:', { threadId });
+    if (existingThreadRows.length > 0) {
+      threadId = existingThreadRows[0].id;
+      if (existingThreadRows[0].status === 'deleted') {
+        await client.query(
+          `UPDATE threads SET status = $1 WHERE id = $2`,
+          ['active', threadId]
+        );
+        console.log('[PAYMENT CALLBACK DEBUG] Reactivated deleted thread:', { threadId });
+      } else {
+        console.log('[PAYMENT CALLBACK DEBUG] Found existing active thread:', { threadId });
+      }
+    } else {
+      // If no thread (active or deleted), try swapping user_id and participant_id in case it was created the other way
+      const { rows: swappedThreadRows } = await client.query(
+        `SELECT id, status FROM threads 
+         WHERE user_id = $1 AND participant_id = $2 AND artwork_id = $3`,
+        [artistKeycloakId, buyerKeycloakId, artwork_id] // Swapped buyer and artist
+      );
+      if (swappedThreadRows.length > 0) {
+        threadId = swappedThreadRows[0].id;
+        if (swappedThreadRows[0].status === 'deleted') {
+          await client.query(
+            `UPDATE threads SET status = $1 WHERE id = $2`,
+            ['active', threadId]
+          );
+          console.log('[PAYMENT CALLBACK DEBUG] Reactivated (swapped) deleted thread:', { threadId });
+        } else {
+          console.log('[PAYMENT CALLBACK DEBUG] Found existing (swapped) active thread:', { threadId });
+        }
+      } else {
+        // If no existing thread in either orientation, then create a new one
+        const { rows: newThreadRows } = await client.query(
+          'INSERT INTO threads (user_id, participant_id, artwork_id, status) ' +
+          'VALUES ($1, $2, $3, $4) RETURNING id',
+          [buyerKeycloakId, artistKeycloakId, artwork_id, 'active'] // Buyer is user_id, Artist is participant_id
+        );
+        threadId = newThreadRows[0].id;
+        console.log('[PAYMENT CALLBACK DEBUG] New thread created:', { threadId, buyerKeycloakId, artistKeycloakId });
+      }
+    }
+    
+    // Send messages using SYSTEM_USER_ID (which is a UUID)
+    const systemUserId = process.env.SYSTEM_USER_ID;
+    if (!systemUserId) {
+        console.error('[PAYMENT CALLBACK ERROR] SYSTEM_USER_ID is not configured in .env. Cannot send system messages.');
+        // Depending on requirements, you might want to throw an error here to rollback, or just skip system messages.
+        // For now, we'll log and skip if not critical for the transaction.
+    } else {
+        console.log('[PAYMENT CALLBACK DEBUG] Using SYSTEM_USER_ID for messages:', systemUserId);
+        await client.query(
+          'INSERT INTO messages (thread_id, sender_id, content, status) ' +
+          'VALUES ($1, $2, $3, $4), ($1, $2, $5, $4)',
+          [
+            threadId,
+            systemUserId,
+            `Order ${order_id} for artwork "${artworkTitle}" has been successfully paid. You can now communicate with the other party.`,
+            'active',
+            `The artist has been notified of your payment for "${artworkTitle}".`
+          ]
+        );
+        console.log('[PAYMENT CALLBACK DEBUG] System messages sent for thread:', { threadId });
+    }
 
     await client.query('COMMIT');
-    console.log('[PAYMENT CALLBACK SUCCESS] Payment processed:', {
+    console.log('[PAYMENT CALLBACK SUCCESS] Payment processed and transaction committed:', {
       order_id,
       payment_id,
       payment_ref: token,
       artwork_id,
-      artwork_status: artworkUpdate.rows[0].status
+      artwork_status: artworkUpdateRows[0].status // From RETURNING clause
     });
-    return res.redirect('http://localhost:3001/orders?success=true');
+    return res.redirect(`${process.env.APP_URL}/orders?payment_status=success&order_id=${order_id}`);
   } catch (error) {
-    console.error('[PAYMENT CALLBACK ERROR] Unexpected error:', { error: error.message, stack: error.stack });
-    await client.query('ROLLBACK');
-    return res.status(500).send('Internal server error');
+    console.error('[PAYMENT CALLBACK ERROR] Unexpected error in transaction:', { error: error.message, stack: error.stack, code: error.code, detail: error.detail });
+    if (client) {
+        try {
+            await client.query('ROLLBACK');
+            console.log('[PAYMENT CALLBACK DEBUG] Transaction rolled back due to error.');
+        } catch (rollbackError) {
+            console.error('[PAYMENT CALLBACK ERROR] Failed to rollback transaction:', { error: rollbackError.message, stack: rollbackError.stack });
+        }
+    }
+    // Provide a more generic error message to the client for security
+    return res.status(500).send('An error occurred while processing your payment. Please contact support if the issue persists.');
   } finally {
-    client.release();
-    console.log('[PAYMENT CALLBACK DEBUG] Database client released');
+    if (client) {
+        client.release();
+        console.log('[PAYMENT CALLBACK DEBUG] Database client released');
+    }
   }
 });
 
