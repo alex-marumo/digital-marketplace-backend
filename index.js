@@ -2922,8 +2922,7 @@ app.get('/payment-callback', async (req, res) => {
     }
     const { artist_id, title: artworkTitle, status: artworkStatus } = artworkRows[0]; // artist_id is an INTEGER
     console.log('[PAYMENT CALLBACK DEBUG] Artwork details:', { artwork_id, artist_id, title: artworkTitle, status: artworkStatus });
-
-
+    
     // Check if artwork is already sold (REFUND LOGIC)
     if (artworkStatus === 'sold') {
       console.log('[PAYMENT CALLBACK WARN] Artwork already sold, refunding:', { artwork_id, artworkTitle });
